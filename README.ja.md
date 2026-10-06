@@ -379,7 +379,7 @@ pnpm tauri build
 - [UI デザインシステムとビジュアルアイデンティティ: コントリビューター募集](https://github.com/TabularisDB/tabularis/issues/195)
 - [プラグインガイド](./plugins/PLUGIN_GUIDE.md)を参考に、好きな言語でドライバープラグインを書く
 
-## スポンサー
+## スポンサーとサポーター
 
 Tabularis は素晴らしいスポンサーとサポーターに支えられています。全リストは[英語版 README](./README.md#sponsors-and-supporters) と [tabularis.dev/sponsors](https://tabularis.dev/sponsors) で確認できます。
 

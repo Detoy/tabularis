@@ -83,15 +83,15 @@ Die Benutzeroberfläche der App ist auf Englisch, Italienisch, Spanisch, Chinesi
 
 ## Warum tabularis?
 
-|  | **tabularis** | DBeaver CE | TablePlus | Beekeeper Studio |
-|---|:---:|:---:|:---:|:---:|
-| Lizenz | Apache 2.0, kostenlos | Apache 2.0, kostenlos (Pro ist kostenpflichtig) | Kommerziell | GPLv3 (kostenpflichtige Editionen) |
-| SQL-Notebooks (SQL- + Markdown-Zellen, zellübergreifende Variablen, Diagramme) | ✅ | ❌ | ❌ | ❌ |
-| Integrierter MCP-Server für KI-Agenten | ✅ | ❌ | ❌ | ❌ |
-| Plugins in **jeder Sprache** (JSON-RPC über stdio) | ✅ | Java-/Eclipse-Plugins | JavaScript-Plugins | ❌ |
-| KI-Text-to-SQL mit **lokalen Modellen** (Ollama) | ✅ | Cloud-basierter KI-Assistent | ❌ | ❌ |
-| Visual EXPLAIN mit interaktiven Plan-Graphen | ✅ | ✅ | ❌ | ❌ |
-| Datenbanken ab Werk | 3 integriert + 21 offizielle Plugins | 100+ | 20+ | ~10 |
+|                                                                                |            **tabularis**             |                   DBeaver CE                    |     TablePlus      |          Beekeeper Studio          |
+| ------------------------------------------------------------------------------ | :----------------------------------: | :---------------------------------------------: | :----------------: | :--------------------------------: |
+| Lizenz                                                                         |        Apache 2.0, kostenlos         | Apache 2.0, kostenlos (Pro ist kostenpflichtig) |    Kommerziell     | GPLv3 (kostenpflichtige Editionen) |
+| SQL-Notebooks (SQL- + Markdown-Zellen, zellübergreifende Variablen, Diagramme) |                  ✅                  |                       ❌                        |         ❌         |                 ❌                 |
+| Integrierter MCP-Server für KI-Agenten                                         |                  ✅                  |                       ❌                        |         ❌         |                 ❌                 |
+| Plugins in **jeder Sprache** (JSON-RPC über stdio)                             |                  ✅                  |              Java-/Eclipse-Plugins              | JavaScript-Plugins |                 ❌                 |
+| KI-Text-to-SQL mit **lokalen Modellen** (Ollama)                               |                  ✅                  |          Cloud-basierter KI-Assistent           |         ❌         |                 ❌                 |
+| Visual EXPLAIN mit interaktiven Plan-Graphen                                   |                  ✅                  |                       ✅                        |         ❌         |                 ❌                 |
+| Datenbanken ab Werk                                                            | 3 integriert + 21 offizielle Plugins |                      100+                       |        20+         |                ~10                 |
 
 > [!NOTE]
 > Vergleich mit Stand Juni 2026; die Funktionen anderer Tools können sich seitdem geändert haben. Wer Dutzende Treiber braucht, ist mit DBeaver besser bedient. Tabularis konzentriert sich darauf, wenige Datenbanken gut zu unterstützen.
@@ -102,27 +102,27 @@ PostgreSQL, MySQL/MariaDB und SQLite sind integriert. Der integrierte PostgreSQL
 
 **Veröffentlicht**
 
-| Datenbank | Plugin | Datenbank | Plugin |
-|---|---|---|---|
-| ClickHouse | [tabularis-clickhouse-plugin](https://github.com/TabularisDB/tabularis-clickhouse-plugin) | LibSQL / Turso | [tabularis-libsql-plugin](https://github.com/TabularisDB/tabularis-libsql-plugin) |
-| Cloudflare D1 | [tabularis_cloudflare_d1_plugin](https://github.com/josejorge/tabularis_cloudflare_d1_plugin) | MongoDB | [tabularis-mongodb-plugin](https://github.com/danielnuld/tabularis-mongodb-plugin) |
-| Cloudflare D1 (HTTP API) | [cloudflare-tabularis](https://github.com/GabrielMalava/cloudflare-tabularis) | MongoDB Atlas | [tabularis-mongodb-plugin](https://github.com/TabularisDB/tabularis-mongodb-plugin) |
-| DM / Dameng | [tabularis-dameng-plugin](https://github.com/haos666/tabularis-dameng-plugin) | Oracle | [tabularis-oracle-plugin](https://github.com/TabularisDB/tabularis-oracle-plugin) |
-| DuckDB | [tabularis-duckdb-plugin](https://github.com/TabularisDB/tabularis-duckdb-plugin) | Redis (Go) | [tabularis-redis-plugin-go](https://github.com/gzamboni/tabularis-redis-plugin-go) |
-| DynamoDB | [tabularis-dynamodb-plugin](https://github.com/TabularisDB/tabularis-dynamodb-plugin) | Redis (Rust) | [tabularis-redis-plugin](https://github.com/nicholas-papachriston/tabularis-redis-plugin) |
-| Elasticsearch | [tabularis-elasticsearch-plugin](https://github.com/TabularisDB/tabularis-elasticsearch-plugin) | SQL Server | [tabularis-sqlserver-plugin](https://github.com/TabularisDB/tabularis-sqlserver-plugin) |
-| Firestore | [firestore-tabularis](https://codeberg.org/NewtTheWolf/firestore-tabularis) | CSV Folder | [tabularis-csv-plugin](https://github.com/TabularisDB/tabularis-csv-plugin) |
-| IBM Db2 | [tabularis-db2-plugin](https://github.com/TabularisDB/tabularis-db2-plugin) | Google Sheets | [tabularis-google-sheets-plugin](https://github.com/TabularisDB/tabularis-google-sheets-plugin) |
-| IBM Informix | [tabularis-informix-plugin](https://github.com/danielnuld/tabularis-informix-plugin) | HackerNews | [tabularis-hackernews-plugin](https://github.com/TabularisDB/tabularis-hackernews-plugin) |
+| Datenbank                | Plugin                                                                                          | Datenbank      | Plugin                                                                                          |
+| ------------------------ | ----------------------------------------------------------------------------------------------- | -------------- | ----------------------------------------------------------------------------------------------- |
+| ClickHouse               | [tabularis-clickhouse-plugin](https://github.com/TabularisDB/tabularis-clickhouse-plugin)       | LibSQL / Turso | [tabularis-libsql-plugin](https://github.com/TabularisDB/tabularis-libsql-plugin)               |
+| Cloudflare D1            | [tabularis_cloudflare_d1_plugin](https://github.com/josejorge/tabularis_cloudflare_d1_plugin)   | MongoDB        | [tabularis-mongodb-plugin](https://github.com/danielnuld/tabularis-mongodb-plugin)              |
+| Cloudflare D1 (HTTP API) | [cloudflare-tabularis](https://github.com/GabrielMalava/cloudflare-tabularis)                   | MongoDB Atlas  | [tabularis-mongodb-plugin](https://github.com/TabularisDB/tabularis-mongodb-plugin)             |
+| DM / Dameng              | [tabularis-dameng-plugin](https://github.com/haos666/tabularis-dameng-plugin)                   | Oracle         | [tabularis-oracle-plugin](https://github.com/TabularisDB/tabularis-oracle-plugin)               |
+| DuckDB                   | [tabularis-duckdb-plugin](https://github.com/TabularisDB/tabularis-duckdb-plugin)               | Redis (Go)     | [tabularis-redis-plugin-go](https://github.com/gzamboni/tabularis-redis-plugin-go)              |
+| DynamoDB                 | [tabularis-dynamodb-plugin](https://github.com/TabularisDB/tabularis-dynamodb-plugin)           | Redis (Rust)   | [tabularis-redis-plugin](https://github.com/nicholas-papachriston/tabularis-redis-plugin)       |
+| Elasticsearch            | [tabularis-elasticsearch-plugin](https://github.com/TabularisDB/tabularis-elasticsearch-plugin) | SQL Server     | [tabularis-sqlserver-plugin](https://github.com/TabularisDB/tabularis-sqlserver-plugin)         |
+| Firestore                | [firestore-tabularis](https://codeberg.org/NewtTheWolf/firestore-tabularis)                     | CSV Folder     | [tabularis-csv-plugin](https://github.com/TabularisDB/tabularis-csv-plugin)                     |
+| IBM Db2                  | [tabularis-db2-plugin](https://github.com/TabularisDB/tabularis-db2-plugin)                     | Google Sheets  | [tabularis-google-sheets-plugin](https://github.com/TabularisDB/tabularis-google-sheets-plugin) |
+| IBM Informix             | [tabularis-informix-plugin](https://github.com/danielnuld/tabularis-informix-plugin)            | HackerNews     | [tabularis-hackernews-plugin](https://github.com/TabularisDB/tabularis-hackernews-plugin)       |
 
 **Auf dem Bounty-Board**
 
-| Status | Datenbanken |
-|---|---|
-| Übernommen | Google BigQuery, Meilisearch |
-| Spezifiziert | Amazon Redshift, CockroachDB, TiDB |
-| Demnächst | Snowflake |
-| Offen | Cassandra, Etcd, Firebird, ScyllaDB, SQL Anywhere, SurrealDB, Trino / Presto |
+| Status       | Datenbanken                                                                  |
+| ------------ | ---------------------------------------------------------------------------- |
+| Übernommen   | Google BigQuery, Meilisearch                                                 |
+| Spezifiziert | Amazon Redshift, CockroachDB, TiDB                                           |
+| Demnächst    | Snowflake                                                                    |
+| Offen        | Cassandra, Etcd, Firebird, ScyllaDB, SQL Anywhere, SurrealDB, Trino / Presto |
 
 > [!NOTE]
 > **Veröffentlichte** Treiber lassen sich aus der [Plugin-Registry](https://tabularis.dev/plugins) installieren. Alles andere steht auf dem [Bounty-Board](https://tabularis.dev/plugins/bounties): übernimm eines, sponsere eines oder [fordere eine Datenbank an](https://github.com/TabularisDB/tabularis/discussions).
@@ -337,20 +337,20 @@ Unterstützte Clients:
 
 Verfügbare Tools:
 
-| Tool | Beschreibung |
-|------|-------------|
-| `list_connections` | Alle gespeicherten Verbindungen auflisten |
-| `list_databases` | Alle Datenbanken einer Verbindung auflisten |
-| `list_tables` | Tabellen einer Verbindung auflisten (optional nach Schema gefiltert) |
-| `describe_table` | Vollständiges Schema abrufen: Spalten, Indizes, Fremdschlüssel |
-| `run_query` | Beliebige SQL-Abfrage ausführen und Ergebnisse zurückgeben |
+| Tool               | Beschreibung                                                         |
+| ------------------ | -------------------------------------------------------------------- |
+| `list_connections` | Alle gespeicherten Verbindungen auflisten                            |
+| `list_databases`   | Alle Datenbanken einer Verbindung auflisten                          |
+| `list_tables`      | Tabellen einer Verbindung auflisten (optional nach Schema gefiltert) |
+| `describe_table`   | Vollständiges Schema abrufen: Spalten, Indizes, Fremdschlüssel       |
+| `run_query`        | Beliebige SQL-Abfrage ausführen und Ergebnisse zurückgeben           |
 
 ## Tech-Stack
 
-| Ebene | Stack |
-|---|---|
+| Ebene    | Stack                                 |
+| -------- | ------------------------------------- |
 | Frontend | React 19, TypeScript, Tailwind CSS v4 |
-| Backend | Rust, Tauri v2, SQLx |
+| Backend  | Rust, Tauri v2, SQLx                  |
 
 ## Entwicklung
 
@@ -379,7 +379,7 @@ Beiträge sind willkommen, siehe [CONTRIBUTING.md](./CONTRIBUTING.md). Gute Eins
 - [UI-Designsystem & visuelle Identität: Aufruf an Mitwirkende](https://github.com/TabularisDB/tabularis/issues/195)
 - Schreibe ein Treiber-Plugin in einer beliebigen Sprache mit dem [Plugin Guide](./plugins/PLUGIN_GUIDE.md)
 
-## Sponsoren
+## Sponsoren und Unterstützer
 
 Tabularis wird von großartigen Sponsoren und Unterstützern getragen. Die vollständige Liste findest du im [englischen README](./README.md#sponsors-and-supporters) und auf [tabularis.dev/sponsors](https://tabularis.dev/sponsors).
 

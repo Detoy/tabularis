@@ -1,4 +1,4 @@
-# Sponsors
+# Sponsors and supporters
 
 Tabularis is made possible thanks to the support of our sponsors.
 Interested in sponsoring? [Get in touch →](https://tabularis.dev/sponsors)

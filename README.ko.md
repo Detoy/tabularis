@@ -379,7 +379,7 @@ pnpm tauri build
 - [UI 디자인 시스템 및 비주얼 아이덴티티: 기여자 모집](https://github.com/TabularisDB/tabularis/issues/195)
 - [Plugin Guide](./plugins/PLUGIN_GUIDE.md)를 참고해 원하는 언어로 드라이버 플러그인 작성
 
-## 스폰서
+## 스폰서 및 후원자
 
 Tabularis는 훌륭한 스폰서와 후원자 덕분에 유지됩니다. 전체 목록은 [영문 README](./README.md#sponsors-and-supporters)와 [tabularis.dev/sponsors](https://tabularis.dev/sponsors)에서 확인하세요.
 

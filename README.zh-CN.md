@@ -379,7 +379,7 @@ pnpm tauri build
 - [UI 设计系统与视觉识别：贡献者招募](https://github.com/TabularisDB/tabularis/issues/195)
 - 参阅[插件指南](./plugins/PLUGIN_GUIDE.md)，用任意语言编写驱动插件
 
-## 赞助者
+## 赞助商与支持者
 
 Tabularis 得到了许多优秀赞助者和支持者的支持。完整名单请查看[英文 README](./README.md#sponsors-and-supporters) 和 [tabularis.dev/sponsors](https://tabularis.dev/sponsors)。
 

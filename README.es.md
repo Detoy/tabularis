@@ -379,7 +379,7 @@ Las contribuciones son bienvenidas, consulta [CONTRIBUTING.md](./CONTRIBUTING.md
 - [Sistema de diseño de UI e identidad visual: llamada a contribuidores](https://github.com/TabularisDB/tabularis/issues/195)
 - Escribe un plugin de driver en cualquier lenguaje con la [Guía de Plugins](./plugins/PLUGIN_GUIDE.md)
 
-## Patrocinadores
+## Patrocinadores y colaboradores
 
 Tabularis cuenta con el apoyo de patrocinadores y colaboradores increíbles. Consulta la lista completa en el [README en inglés](./README.md#sponsors-and-supporters) y en [tabularis.dev/sponsors](https://tabularis.dev/sponsors).
 
