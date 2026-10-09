@@ -274,7 +274,7 @@ export const DataGrid = React.memo(
     scrollToNewInsertion,
   }: DataGridProps) {
     const { t } = useTranslation();
-    const { activeSchema, connections } = useDatabase();
+    const { activeSchema, connections, activeDriver } = useDatabase();
     const guardProductionWrite = useProductionGuard();
     const { showAlert } = useAlert();
     const { showToast } = useToast();
@@ -3121,9 +3121,10 @@ export const DataGrid = React.memo(
                   <SlotAnchor
                     name="data-grid.context-menu.items"
                     context={{
-                      connectionId,
-                      tableName,
+                      connectionId: connectionId ?? null,
+                      tableName: tableName ?? null,
                       schema: activeSchema,
+                      driver: activeDriver,
                       columnName: contextMenu.colName,
                       rowIndex: contextMenu.rowIndex,
                       rowData: mergedRows[contextMenu.rowIndex]
