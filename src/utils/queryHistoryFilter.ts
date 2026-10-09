@@ -1,4 +1,5 @@
 import type { QueryHistoryEntry } from "../types/queryHistory";
+import { resolveZone, zonedYmd } from "./dateGroups";
 
 /** Outcome filter for the Query History panel. */
 export type QueryHistoryOutcomeFilter = "any" | "succeeded" | "failed";
@@ -35,34 +36,9 @@ export interface QueryHistoryFilterOptions {
   timeZone?: string;
 }
 
+
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
-
-type Ymd = { y: number; m: number; d: number };
-
-function resolveZone(timeZone?: string): string | undefined {
-  return timeZone && timeZone !== "auto" ? timeZone : undefined;
-}
-
-/** Calendar year/month/day of an instant as seen in the given timezone. */
-function zonedYmd(date: Date, zone: string | undefined): Ymd {
-  const opts: Intl.DateTimeFormatOptions = {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  };
-  let parts: Intl.DateTimeFormatPart[];
-  try {
-    parts = new Intl.DateTimeFormat("en-CA", { ...opts, timeZone: zone }).formatToParts(
-      date,
-    );
-  } catch {
-    parts = new Intl.DateTimeFormat("en-CA", opts).formatToParts(date);
-  }
-  const get = (t: Intl.DateTimeFormatPartTypes): number =>
-    Number(parts.find((p) => p.type === t)?.value);
-  return { y: get("year"), m: get("month"), d: get("day") };
-}
 
 function sameCalendarDay(a: Date, b: Date, zone: string | undefined): boolean {
   const left = zonedYmd(a, zone);

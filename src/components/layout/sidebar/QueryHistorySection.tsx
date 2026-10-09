@@ -1,6 +1,6 @@
 import { useState, useMemo } from "react";
 import { useTranslation } from "react-i18next";
-import { Search, Trash2, Loader2, Database, AlertTriangle, X } from "lucide-react";
+import { Search, Trash2, Loader2, Database, AlertTriangle, X, ChevronDown } from "lucide-react";
 import { groupByDate, formatHistoryTime } from "../../../utils/dateGroups";
 import { SqlHighlight } from "../../ui/SqlHighlight";
 import { formatSqlPreview } from "../../../utils/sqlHighlight";
@@ -8,6 +8,8 @@ import { useSettings } from "../../../hooks/useSettings";
 import {
   filterQueryHistoryEntries,
   isQueryHistoryFilterActive,
+  QUERY_HISTORY_OUTCOME_OPTIONS,
+  QUERY_HISTORY_TIME_RANGE_OPTIONS,
   type QueryHistoryOutcomeFilter,
   type QueryHistoryTimeRange,
 } from "../../../utils/queryHistoryFilter";
@@ -30,7 +32,21 @@ interface QueryHistorySectionProps {
 }
 
 const selectClassName =
-  "w-full appearance-none bg-surface-secondary border border-default rounded px-1.5 py-1 text-[11px] text-primary focus:outline-none focus:border-focus/50 cursor-pointer";
+  "w-full appearance-none bg-surface-secondary border border-default rounded px-1.5 pr-5 py-1 text-[11px] text-primary focus:outline-none focus:border-focus/50 cursor-pointer";
+
+const OUTCOME_LABEL_KEYS: Record<QueryHistoryOutcomeFilter, string> = {
+  any: "sidebar.historyOutcomeAny",
+  succeeded: "sidebar.historyOutcomeSucceeded",
+  failed: "sidebar.historyOutcomeFailed",
+};
+
+const TIME_RANGE_LABEL_KEYS: Record<QueryHistoryTimeRange, string> = {
+  all: "sidebar.historyTimeAll",
+  lastHour: "sidebar.historyTimeLastHour",
+  today: "sidebar.historyTimeToday",
+  last7Days: "sidebar.historyTimeLast7Days",
+  last30Days: "sidebar.historyTimeLast30Days",
+};
 
 export function QueryHistorySection({
   entries,
@@ -156,28 +172,42 @@ export function QueryHistorySection({
 
       {/* Outcome + time filters (session-only, same as search) */}
       <div className="px-2 pb-1.5 flex items-center gap-1">
-        <select
-          value={outcome}
-          onChange={(e) => setOutcome(e.target.value as QueryHistoryOutcomeFilter)}
-          aria-label={t("sidebar.historyOutcomeFilter")}
-          className={selectClassName}
-        >
-          <option value="any">{t("sidebar.historyOutcomeAny")}</option>
-          <option value="succeeded">{t("sidebar.historyOutcomeSucceeded")}</option>
-          <option value="failed">{t("sidebar.historyOutcomeFailed")}</option>
-        </select>
-        <select
-          value={timeRange}
-          onChange={(e) => setTimeRange(e.target.value as QueryHistoryTimeRange)}
-          aria-label={t("sidebar.historyTimeRangeFilter")}
-          className={selectClassName}
-        >
-          <option value="all">{t("sidebar.historyTimeAll")}</option>
-          <option value="lastHour">{t("sidebar.historyTimeLastHour")}</option>
-          <option value="today">{t("sidebar.historyTimeToday")}</option>
-          <option value="last7Days">{t("sidebar.historyTimeLast7Days")}</option>
-          <option value="last30Days">{t("sidebar.historyTimeLast30Days")}</option>
-        </select>
+        <div className="relative flex-1 min-w-0">
+          <select
+            value={outcome}
+            onChange={(e) => setOutcome(e.target.value as QueryHistoryOutcomeFilter)}
+            aria-label={t("sidebar.historyOutcomeFilter")}
+            className={selectClassName}
+          >
+            {QUERY_HISTORY_OUTCOME_OPTIONS.map((value) => (
+              <option key={value} value={value}>
+                {t(OUTCOME_LABEL_KEYS[value])}
+              </option>
+            ))}
+          </select>
+          <ChevronDown
+            size={10}
+            className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted pointer-events-none"
+          />
+        </div>
+        <div className="relative flex-1 min-w-0">
+          <select
+            value={timeRange}
+            onChange={(e) => setTimeRange(e.target.value as QueryHistoryTimeRange)}
+            aria-label={t("sidebar.historyTimeRangeFilter")}
+            className={selectClassName}
+          >
+            {QUERY_HISTORY_TIME_RANGE_OPTIONS.map((value) => (
+              <option key={value} value={value}>
+                {t(TIME_RANGE_LABEL_KEYS[value])}
+              </option>
+            ))}
+          </select>
+          <ChevronDown
+            size={10}
+            className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted pointer-events-none"
+          />
+        </div>
       </div>
 
       {/* Filtered / total counter whenever any filter is active */}
