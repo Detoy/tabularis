@@ -201,6 +201,16 @@ impl K8sTunnel {
         }
     }
 
+    /// A kubectl port-forward dies when the pod restarts, the network drops, or
+    /// credentials expire. A cached tunnel therefore goes stale on its own, so
+    /// reuse has to prove the process is still running rather than trust the map.
+    pub fn is_alive(&self) -> bool {
+        match self.child.lock() {
+            Ok(mut c) => matches!(c.try_wait(), Ok(None)),
+            Err(_) => false,
+        }
+    }
+
     /// Check that kubectl is available.
     fn verify_kubectl(options: &K8sCommandOptions) -> Result<(), String> {
         command::run_kubectl(
@@ -209,6 +219,16 @@ impl K8sTunnel {
             "kubectl version check failed. Please verify your kubectl installation",
         )
         .map(|_| ())
+    }
+}
+
+pub fn stop_all_tunnels() {
+    if let Some(tunnels) = TUNNELS.get() {
+        if let Ok(mut guard) = tunnels.lock() {
+            for (_, tunnel) in guard.drain() {
+                tunnel.stop();
+            }
+        }
     }
 }
 

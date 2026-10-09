@@ -366,16 +366,22 @@ fn resolve_k8s_params(params: &ConnectionParams) -> Result<ConnectionParams, Str
         &options,
     );
 
-    // Check for existing tunnel
     {
-        let tunnels = crate::k8s_tunnel::get_tunnels().lock().unwrap();
+        let mut tunnels = crate::k8s_tunnel::get_tunnels().lock().unwrap();
         if let Some(tunnel) = tunnels.get(&map_key) {
-            log::debug!("Reusing existing K8s tunnel on port {}", tunnel.local_port);
-            let mut new_params = params.clone();
-            new_params.k8s_enabled = Some(false);
-            new_params.host = Some("127.0.0.1".to_string());
-            new_params.port = Some(tunnel.local_port);
-            return Ok(new_params);
+            if tunnel.is_alive() {
+                log::debug!("Reusing existing K8s tunnel on port {}", tunnel.local_port);
+                let mut new_params = params.clone();
+                new_params.k8s_enabled = Some(false);
+                new_params.host = Some("127.0.0.1".to_string());
+                new_params.port = Some(tunnel.local_port);
+                return Ok(new_params);
+            }
+            log::info!(
+                "Discarding dead K8s tunnel on port {}; kubectl port-forward exited",
+                tunnel.local_port
+            );
+            tunnels.remove(&map_key);
         }
     }
 
@@ -2500,19 +2506,25 @@ pub async fn expand_k8s_connection_params<R: Runtime>(
         &options,
     );
 
-    // Check for existing tunnel
     {
-        let tunnels = crate::k8s_tunnel::get_tunnels().lock().unwrap();
+        let mut tunnels = crate::k8s_tunnel::get_tunnels().lock().unwrap();
         if let Some(tunnel) = tunnels.get(&map_key) {
-            log::debug!(
-                "Reusing existing K8s tunnel on port {}",
+            if tunnel.is_alive() {
+                log::debug!(
+                    "Reusing existing K8s tunnel on port {}",
+                    tunnel.local_port
+                );
+                let mut new_params = params.clone();
+                new_params.k8s_enabled = Some(false);
+                new_params.host = Some("127.0.0.1".to_string());
+                new_params.port = Some(tunnel.local_port);
+                return Ok(new_params);
+            }
+            log::info!(
+                "Discarding dead K8s tunnel on port {}; kubectl port-forward exited",
                 tunnel.local_port
             );
-            let mut new_params = params.clone();
-            new_params.k8s_enabled = Some(false);
-            new_params.host = Some("127.0.0.1".to_string());
-            new_params.port = Some(tunnel.local_port);
-            return Ok(new_params);
+            tunnels.remove(&map_key);
         }
     }
 
