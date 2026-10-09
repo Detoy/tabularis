@@ -5,6 +5,12 @@ import { groupByDate, formatHistoryTime } from "../../../utils/dateGroups";
 import { SqlHighlight } from "../../ui/SqlHighlight";
 import { formatSqlPreview } from "../../../utils/sqlHighlight";
 import { useSettings } from "../../../hooks/useSettings";
+import {
+  filterQueryHistoryEntries,
+  isQueryHistoryFilterActive,
+  type QueryHistoryOutcomeFilter,
+  type QueryHistoryTimeRange,
+} from "../../../utils/queryHistoryFilter";
 import type {
   QueryHistoryEntry,
   QueryHistoryRecoveryNotice,
@@ -23,6 +29,9 @@ interface QueryHistorySectionProps {
   onClearAll: () => void;
 }
 
+const selectClassName =
+  "w-full appearance-none bg-surface-secondary border border-default rounded px-1.5 py-1 text-[11px] text-primary focus:outline-none focus:border-focus/50 cursor-pointer";
+
 export function QueryHistorySection({
   entries,
   isLoading,
@@ -34,14 +43,25 @@ export function QueryHistorySection({
 }: QueryHistorySectionProps) {
   const { t } = useTranslation();
   const { settings } = useSettings();
+  // Session-only: search and the new filters reset when the section unmounts
+  // (same as the existing search field; nothing is persisted).
   const [search, setSearch] = useState("");
+  const [outcome, setOutcome] = useState<QueryHistoryOutcomeFilter>("any");
+  const [timeRange, setTimeRange] = useState<QueryHistoryTimeRange>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  const filteredEntries = useMemo(() => {
-    if (!search.trim()) return entries;
-    const lower = search.toLowerCase();
-    return entries.filter((e) => e.sql.toLowerCase().includes(lower));
-  }, [entries, search]);
+  const filterActive = isQueryHistoryFilterActive({ search, outcome, timeRange });
+
+  const filteredEntries = useMemo(
+    () =>
+      filterQueryHistoryEntries(entries, {
+        search,
+        outcome,
+        timeRange,
+        timeZone: settings.displayTimezone,
+      }),
+    [entries, search, outcome, timeRange, settings.displayTimezone],
+  );
 
   const groupedEntries = useMemo(
     () => groupByDate(filteredEntries, (e) => e.executedAt, settings.displayTimezone),
@@ -124,16 +144,44 @@ export function QueryHistorySection({
           />
         </div>
         <button
+          type="button"
           onClick={onClearAll}
-          className="p-1 text-muted hover:text-accent-error transition-colors shrink-0"
+          className="p-1 text-muted hover:text-accent-error transition-colors shrink-0 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-focus"
           title={t("sidebar.clearAllHistory")}
+          aria-label={t("sidebar.clearAllHistory")}
         >
           <Trash2 size={13} />
         </button>
       </div>
 
-      {/* Search result count */}
-      {search.trim() && (
+      {/* Outcome + time filters (session-only, same as search) */}
+      <div className="px-2 pb-1.5 flex items-center gap-1">
+        <select
+          value={outcome}
+          onChange={(e) => setOutcome(e.target.value as QueryHistoryOutcomeFilter)}
+          aria-label={t("sidebar.historyOutcomeFilter")}
+          className={selectClassName}
+        >
+          <option value="any">{t("sidebar.historyOutcomeAny")}</option>
+          <option value="succeeded">{t("sidebar.historyOutcomeSucceeded")}</option>
+          <option value="failed">{t("sidebar.historyOutcomeFailed")}</option>
+        </select>
+        <select
+          value={timeRange}
+          onChange={(e) => setTimeRange(e.target.value as QueryHistoryTimeRange)}
+          aria-label={t("sidebar.historyTimeRangeFilter")}
+          className={selectClassName}
+        >
+          <option value="all">{t("sidebar.historyTimeAll")}</option>
+          <option value="lastHour">{t("sidebar.historyTimeLastHour")}</option>
+          <option value="today">{t("sidebar.historyTimeToday")}</option>
+          <option value="last7Days">{t("sidebar.historyTimeLast7Days")}</option>
+          <option value="last30Days">{t("sidebar.historyTimeLast30Days")}</option>
+        </select>
+      </div>
+
+      {/* Filtered / total counter whenever any filter is active */}
+      {filterActive && (
         <div className="px-3 pb-1 text-[10px] text-muted">
           {filteredEntries.length} / {entries.length}
         </div>
