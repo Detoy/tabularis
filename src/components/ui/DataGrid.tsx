@@ -3111,6 +3111,14 @@ export const DataGrid = React.memo(
                 );
               }
 
+              const contextMergedRow = mergedRows[contextMenu.rowIndex];
+              const contextMenuRowData = contextMergedRow
+                ? buildRowDataWithPending(
+                    contextMergedRow.rowData,
+                    contextMergedRow.type === "insertion",
+                  )
+                : undefined;
+
               return (
                 <ContextMenu
                   x={contextMenu.x}
@@ -3127,10 +3135,7 @@ export const DataGrid = React.memo(
                       driver: activeDriver,
                       columnName: contextMenu.colName,
                       rowIndex: contextMenu.rowIndex,
-                      rowData: mergedRows[contextMenu.rowIndex]
-                        ?.rowData as unknown as
-                        | Record<string, unknown>
-                        | undefined,
+                      rowData: contextMenuRowData,
                     }}
                     className="border-t border-default mt-1 pt-1"
                   />
