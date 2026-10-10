@@ -590,3 +590,114 @@ mod stop_all_tunnels_tests {
         assert!(get_tunnels().lock().unwrap().is_empty());
     }
 }
+
+#[cfg(unix)]
+mod reuse_or_discard_dead_tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    fn map_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn stub_tunnel(script: &str, local_port: u16) -> K8sTunnel {
+        let child = Command::new("sh")
+            .args(["-c", script])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        K8sTunnel {
+            local_port,
+            child: Arc::new(Mutex::new(child)),
+        }
+    }
+
+    fn test_key(suffix: &str) -> K8sTunnelKey {
+        build_tunnel_key(
+            &format!("test-ctx-reuse-{suffix}"),
+            "ns",
+            "service",
+            "db",
+            3306,
+            &K8sCommandOptions::default(),
+        )
+    }
+
+    #[test]
+    fn alive_entry_is_reused() {
+        let _guard = map_lock().lock().unwrap();
+        stop_all_tunnels();
+        let key = test_key("alive");
+        let tunnel = stub_tunnel("sleep 30", 54331);
+        {
+            let mut tunnels = get_tunnels().lock().unwrap();
+            tunnels.insert(key.clone(), tunnel);
+        }
+
+        assert_eq!(reuse_or_discard_dead(&key), Ok(54331));
+        assert!(get_tunnels().lock().unwrap().contains_key(&key));
+
+        stop_all_tunnels();
+    }
+
+    #[test]
+    fn dead_entry_gets_removed_and_returns_previous_port() {
+        let _guard = map_lock().lock().unwrap();
+        stop_all_tunnels();
+        let key = test_key("dead");
+        let tunnel = stub_tunnel("exit 0", 54332);
+        // Reap the child so is_alive() reports dead.
+        tunnel.child.lock().unwrap().wait().unwrap();
+        {
+            let mut tunnels = get_tunnels().lock().unwrap();
+            tunnels.insert(key.clone(), tunnel);
+        }
+
+        assert_eq!(reuse_or_discard_dead(&key), Err(Some(54332)));
+        assert!(!get_tunnels().lock().unwrap().contains_key(&key));
+    }
+
+    #[test]
+    fn missing_entry_returns_none() {
+        let _guard = map_lock().lock().unwrap();
+        stop_all_tunnels();
+        let key = test_key("missing");
+        assert_eq!(reuse_or_discard_dead(&key), Err(None));
+    }
+
+    #[test]
+    fn insert_tunnel_stops_displaced_child() {
+        let _guard = map_lock().lock().unwrap();
+        stop_all_tunnels();
+        let key = test_key("displace");
+        let first = stub_tunnel("sleep 30", 54333);
+        let first_child = Arc::clone(&first.child);
+        {
+            let mut tunnels = get_tunnels().lock().unwrap();
+            tunnels.insert(key.clone(), first);
+        }
+
+        let second = stub_tunnel("sleep 30", 54334);
+        insert_tunnel(key.clone(), second);
+
+        {
+            let tunnels = get_tunnels().lock().unwrap();
+            assert_eq!(tunnels.get(&key).unwrap().local_port, 54334);
+        }
+
+        let mut exited = false;
+        for _ in 0..20 {
+            if matches!(first_child.lock().unwrap().try_wait(), Ok(Some(_))) {
+                exited = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(exited, "displaced stub child still running after insert_tunnel");
+
+        stop_all_tunnels();
+    }
+}

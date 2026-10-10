@@ -366,24 +366,17 @@ fn resolve_k8s_params(params: &ConnectionParams) -> Result<ConnectionParams, Str
         &options,
     );
 
-    {
-        let mut tunnels = crate::k8s_tunnel::get_tunnels().lock().unwrap();
-        if let Some(tunnel) = tunnels.get(&map_key) {
-            if tunnel.is_alive() {
-                log::debug!("Reusing existing K8s tunnel on port {}", tunnel.local_port);
-                let mut new_params = params.clone();
-                new_params.k8s_enabled = Some(false);
-                new_params.host = Some("127.0.0.1".to_string());
-                new_params.port = Some(tunnel.local_port);
-                return Ok(new_params);
-            }
-            log::info!(
-                "Discarding dead K8s tunnel on port {}; kubectl port-forward exited",
-                tunnel.local_port
-            );
-            tunnels.remove(&map_key);
+    let preferred_local_port = match crate::k8s_tunnel::reuse_or_discard_dead(&map_key) {
+        Ok(local_port) => {
+            log::debug!("Reusing existing K8s tunnel on port {}", local_port);
+            let mut new_params = params.clone();
+            new_params.k8s_enabled = Some(false);
+            new_params.host = Some("127.0.0.1".to_string());
+            new_params.port = Some(local_port);
+            return Ok(new_params);
         }
-    }
+        Err(previous) => previous,
+    };
 
     log::info!(
         "Creating new K8s tunnel for {}/{} in {}:{} (context: {})",
@@ -397,6 +390,7 @@ fn resolve_k8s_params(params: &ConnectionParams) -> Result<ConnectionParams, Str
         resource_name,
         port,
         &options,
+        preferred_local_port,
     )
     .map_err(|e| {
         eprintln!("[Connection Error] K8s Tunnel setup failed: {}", e);
@@ -406,10 +400,7 @@ fn resolve_k8s_params(params: &ConnectionParams) -> Result<ConnectionParams, Str
     let local_port = tunnel.local_port;
     log::info!("K8s tunnel created successfully on port {}", local_port);
 
-    {
-        let mut tunnels = crate::k8s_tunnel::get_tunnels().lock().unwrap();
-        tunnels.insert(map_key, tunnel);
-    }
+    crate::k8s_tunnel::insert_tunnel(map_key, tunnel);
 
     let mut new_params = params.clone();
     new_params.k8s_enabled = Some(false);
@@ -2506,27 +2497,17 @@ pub async fn expand_k8s_connection_params<R: Runtime>(
         &options,
     );
 
-    {
-        let mut tunnels = crate::k8s_tunnel::get_tunnels().lock().unwrap();
-        if let Some(tunnel) = tunnels.get(&map_key) {
-            if tunnel.is_alive() {
-                log::debug!(
-                    "Reusing existing K8s tunnel on port {}",
-                    tunnel.local_port
-                );
-                let mut new_params = params.clone();
-                new_params.k8s_enabled = Some(false);
-                new_params.host = Some("127.0.0.1".to_string());
-                new_params.port = Some(tunnel.local_port);
-                return Ok(new_params);
-            }
-            log::info!(
-                "Discarding dead K8s tunnel on port {}; kubectl port-forward exited",
-                tunnel.local_port
-            );
-            tunnels.remove(&map_key);
+    let preferred_local_port = match crate::k8s_tunnel::reuse_or_discard_dead(&map_key) {
+        Ok(local_port) => {
+            log::debug!("Reusing existing K8s tunnel on port {}", local_port);
+            let mut new_params = params.clone();
+            new_params.k8s_enabled = Some(false);
+            new_params.host = Some("127.0.0.1".to_string());
+            new_params.port = Some(local_port);
+            return Ok(new_params);
         }
-    }
+        Err(previous) => previous,
+    };
 
     // Create new tunnel
     log::info!(
@@ -2545,6 +2526,7 @@ pub async fn expand_k8s_connection_params<R: Runtime>(
         &resource_name,
         port,
         &options,
+        preferred_local_port,
     )
     .map_err(|e| {
         eprintln!("[Connection Error] K8s Tunnel setup failed: {}", e);
@@ -2554,10 +2536,7 @@ pub async fn expand_k8s_connection_params<R: Runtime>(
     let local_port = tunnel.local_port;
     log::info!("K8s tunnel created successfully on port {}", local_port);
 
-    {
-        let mut tunnels = crate::k8s_tunnel::get_tunnels().lock().unwrap();
-        tunnels.insert(map_key, tunnel);
-    }
+    crate::k8s_tunnel::insert_tunnel(map_key, tunnel);
 
     let mut new_params = params.clone();
     new_params.k8s_enabled = Some(false);
