@@ -750,11 +750,15 @@ describe("filterBar utils", () => {
 
     describe("buildValuePickerWhere", () => {
       it("narrows by the other complete, enabled rows when matching all", () => {
-        expect(buildValuePickerWhere(filters, "a", null, "AND")).toBe("priority > 2 AND deleted_at IS NULL");
+        expect(buildValuePickerWhere(filters, "a", null, "AND")).toBe(
+          '"priority" > 2 AND "deleted_at" IS NULL'
+        );
       });
 
       it("skips the row being edited", () => {
-        expect(buildValuePickerWhere(filters, "b", null, "AND")).toBe("status = 'open' AND deleted_at IS NULL");
+        expect(buildValuePickerWhere(filters, "b", null, "AND")).toBe(
+          "\"status\" = 'open' AND \"deleted_at\" IS NULL"
+        );
       });
 
       it("does not narrow when matching any, since other rows widen the result", () => {
@@ -771,7 +775,16 @@ describe("filterBar utils", () => {
           { id: "y", column: "n", operator: "BETWEEN", value: "1", value2: "" },
           { id: "z", column: "m", operator: "BETWEEN", value: "1", value2: "5" },
         ];
-        expect(buildValuePickerWhere(rows, "x", null, "AND")).toBe("m BETWEEN 1 AND 5");
+        expect(buildValuePickerWhere(rows, "x", null, "AND")).toBe('"m" BETWEEN 1 AND 5');
+      });
+
+      it("quotes WHERE columns like buildDistinctValuesQuery (MySQL reserved words)", () => {
+        const rows: StructuredFilter[] = [
+          { id: "edit", column: "status", operator: "=", value: "open" },
+          { id: "other", column: "order", operator: ">", value: "5" },
+        ];
+        expect(buildValuePickerWhere(rows, "edit", "mysql", "AND")).toBe("`order` > 5");
+        expect(buildValuePickerWhere(rows, "edit", "postgres", "AND")).toBe('"order" > 5');
       });
     });
 

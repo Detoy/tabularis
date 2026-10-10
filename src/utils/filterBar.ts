@@ -168,11 +168,17 @@ export function getOperatorsForType(dataType: string): FilterOperator[] {
  * String values are single-quoted. IS NULL / IS NOT NULL ignore the value.
  * BETWEEN uses value AND value2. IN/NOT IN parse comma-separated values.
  */
+export type FilterQuoteMode = "auto" | "always";
+
 export function buildSingleFilterClause(
   filter: StructuredFilter,
-  driver?: string | PluginManifest | DriverCapabilities | null
+  driver?: string | PluginManifest | DriverCapabilities | null,
+  quoteMode: FilterQuoteMode = "auto",
 ): string {
-  const col = formatSqlIdentifier(filter.column, driver);
+  const col =
+    quoteMode === "always"
+      ? quoteIdentifier(filter.column, driver)
+      : formatSqlIdentifier(filter.column, driver);
   const op = filter.operator;
 
   if (op === "IS NULL") {
@@ -293,11 +299,12 @@ function quoteIfNeeded(value: string): string {
 export function buildStructuredFilterClause(
   filters: StructuredFilter[],
   driver?: string | PluginManifest | DriverCapabilities | null,
-  combinator: FilterCombinator = "AND"
+  combinator: FilterCombinator = "AND",
+  quoteMode: FilterQuoteMode = "auto",
 ): string {
   const clauses = filters
     .filter((f) => f.column && f.enabled !== false)
-    .map((f) => buildSingleFilterClause(f, driver));
+    .map((f) => buildSingleFilterClause(f, driver, quoteMode));
   const joined = clauses.join(` ${combinator} `);
   return combinator === "OR" && clauses.length > 1 ? `(${joined})` : joined;
 }
@@ -444,7 +451,9 @@ export function buildValuePickerWhere(
 ): string {
   if (combinator === "OR") return "";
   const others = filters.filter((f) => f.id !== excludeId && isCompleteFilter(f));
-  return buildStructuredFilterClause(others, driver, "AND");
+  // Always quote columns so the WHERE matches buildDistinctValuesQuery
+  // (quoteIdentifier), including MySQL reserved words like `order` / `group`.
+  return buildStructuredFilterClause(others, driver, "AND", "always");
 }
 
 function stringifyCell(value: unknown): string {
