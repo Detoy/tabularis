@@ -397,10 +397,8 @@ fn resolve_k8s_params(params: &ConnectionParams) -> Result<ConnectionParams, Str
         e
     })?;
 
-    let local_port = tunnel.local_port;
+    let local_port = crate::k8s_tunnel::insert_tunnel(map_key, tunnel);
     log::info!("K8s tunnel created successfully on port {}", local_port);
-
-    crate::k8s_tunnel::insert_tunnel(map_key, tunnel);
 
     let mut new_params = params.clone();
     new_params.k8s_enabled = Some(false);
@@ -2549,10 +2547,8 @@ pub async fn expand_k8s_connection_params<R: Runtime>(
         e
     })?;
 
-    let local_port = tunnel.local_port;
+    let local_port = crate::k8s_tunnel::insert_tunnel(map_key, tunnel);
     log::info!("K8s tunnel created successfully on port {}", local_port);
-
-    crate::k8s_tunnel::insert_tunnel(map_key, tunnel);
 
     let mut new_params = params.clone();
     new_params.k8s_enabled = Some(false);

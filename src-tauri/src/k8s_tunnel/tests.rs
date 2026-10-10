@@ -14,7 +14,6 @@ fn tunnels_map_lock() -> &'static std::sync::Mutex<()> {
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
-
 mod build_tunnel_key_tests {
     use super::*;
 
@@ -692,36 +691,110 @@ mod reuse_or_discard_dead_tests {
     }
 
     #[test]
-    fn insert_tunnel_stops_displaced_child() {
+    fn insert_tunnel_keeps_live_child_and_stops_redundant_child() {
         let _guard = map_lock().lock().unwrap();
         stop_all_tunnels();
         let key = test_key("displace");
-        let first = stub_tunnel("sleep 30", 54333);
+        let first = stub_tunnel("exec sleep 30", 54333);
         let first_child = Arc::clone(&first.child);
         {
             let mut tunnels = get_tunnels().lock().unwrap();
             tunnels.insert(key.clone(), first);
         }
 
-        let second = stub_tunnel("sleep 30", 54334);
-        insert_tunnel(key.clone(), second);
+        let second = stub_tunnel("exec sleep 30", 54334);
+        let second_child = Arc::clone(&second.child);
+        assert_eq!(insert_tunnel(key.clone(), second), 54333);
 
         {
             let tunnels = get_tunnels().lock().unwrap();
-            assert_eq!(tunnels.get(&key).unwrap().local_port, 54334);
+            let cached = tunnels.get(&key).unwrap();
+            assert_eq!(cached.local_port, 54333);
+            assert!(Arc::ptr_eq(&cached.child, &first_child));
+            assert!(cached.is_alive());
         }
 
         let mut exited = false;
         for _ in 0..20 {
-            if matches!(first_child.lock().unwrap().try_wait(), Ok(Some(_))) {
+            if matches!(second_child.lock().unwrap().try_wait(), Ok(Some(_))) {
                 exited = true;
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(25));
         }
-        assert!(exited, "displaced stub child still running after insert_tunnel");
+        assert!(
+            exited,
+            "redundant stub child still running after insert_tunnel"
+        );
 
         stop_all_tunnels();
+        first_child.lock().unwrap().wait().unwrap();
+    }
+
+    #[test]
+    fn concurrent_creators_return_the_same_surviving_port() {
+        let _guard = map_lock().lock().unwrap();
+        stop_all_tunnels();
+        let key = test_key("concurrent");
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let creators: Vec<_> = [54335, 54336]
+            .into_iter()
+            .map(|port| {
+                let key = key.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    assert_eq!(reuse_or_discard_dead(&key), Err(None));
+                    let tunnel = stub_tunnel("exec sleep 30", port);
+                    let child = Arc::clone(&tunnel.child);
+                    barrier.wait();
+                    (insert_tunnel(key, tunnel), child)
+                })
+            })
+            .collect();
+        let results: Vec<_> = creators
+            .into_iter()
+            .map(|task| task.join().unwrap())
+            .collect();
+
+        let cached = get_tunnels().lock().unwrap().get(&key).unwrap().clone();
+        assert!(cached.is_alive());
+        for (returned_port, child) in &results {
+            assert_eq!(*returned_port, cached.local_port);
+            if !Arc::ptr_eq(child, &cached.child) {
+                // wait() both verifies termination and reaps the redundant child.
+                assert!(!child.lock().unwrap().wait().unwrap().success());
+            }
+        }
+        assert_eq!(reuse_or_discard_dead(&key), Ok(cached.local_port));
+        stop_all_tunnels();
+        cached.child.lock().unwrap().wait().unwrap();
+    }
+
+    #[test]
+    fn occupied_previous_port_remains_cached_for_a_later_retry() {
+        let _guard = map_lock().lock().unwrap();
+        stop_all_tunnels();
+        let key = test_key("occupied");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let dead = stub_tunnel("exit 0", port);
+        dead.child.lock().unwrap().wait().unwrap();
+        get_tunnels().lock().unwrap().insert(key.clone(), dead);
+
+        let preferred = reuse_or_discard_dead(&key).unwrap_err();
+        assert_eq!(preferred, Some(port));
+        assert!(allocate_local_port(preferred).is_err());
+        assert_eq!(reuse_or_discard_dead(&key), Err(Some(port)));
+
+        drop(listener);
+        let retried_port = allocate_local_port(reuse_or_discard_dead(&key).unwrap_err()).unwrap();
+        assert_eq!(retried_port, port);
+        let replacement = stub_tunnel("exec sleep 30", retried_port);
+        let child = Arc::clone(&replacement.child);
+        assert_eq!(insert_tunnel(key.clone(), replacement), port);
+        assert_eq!(reuse_or_discard_dead(&key), Ok(port));
+        stop_all_tunnels();
+        child.lock().unwrap().wait().unwrap();
     }
 }
 
@@ -740,13 +813,12 @@ mod allocate_local_port_tests {
     }
 
     #[test]
-    fn preferred_port_falls_back_when_taken() {
+    fn preferred_port_errors_when_taken() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let taken = listener.local_addr().unwrap().port();
         // Keep listener alive so the preferred port is occupied.
-        let allocated = allocate_local_port(Some(taken)).unwrap();
-        assert_ne!(allocated, taken);
-        assert!(allocated > 0);
+        let error = allocate_local_port(Some(taken)).unwrap_err();
+        assert!(error.contains(&format!("Failed to reuse local port {}", taken)));
         drop(listener);
     }
 

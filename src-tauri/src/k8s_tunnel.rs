@@ -40,26 +40,20 @@ pub fn get_tunnels() -> &'static Mutex<HashMap<K8sTunnelKey, K8sTunnel>> {
 
 /// Allocate a local TCP port for kubectl port-forward.
 ///
-/// When `preferred` is set (replacing a dead tunnel), try that port first so
+/// When `preferred` is set (replacing a dead tunnel), require that port so
 /// existing connection pools that still point at it keep working. If the bind
-/// fails, fall back to an ephemeral port. Callers avoid orphaning the preferred
-/// port across failed respawns by leaving the dead map entry until
+/// fails, return an error. Callers retain the preferred port across failed
+/// respawns by leaving the dead map entry until
 /// [`insert_tunnel`] succeeds (see [`reuse_or_discard_dead`]).
 pub(crate) fn allocate_local_port(preferred: Option<u16>) -> Result<u16, String> {
     if let Some(port) = preferred {
-        match TcpListener::bind(("127.0.0.1", port)) {
-            Ok(listener) => {
-                let bound = listener.local_addr().unwrap().port();
-                drop(listener);
-                return Ok(bound);
-            }
-            Err(e) => {
-                eprintln!(
-                    "[K8s Tunnel] Preferred local port {} unavailable ({}), allocating ephemeral",
-                    port, e
-                );
-            }
-        }
+        let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|e| {
+            format!(
+                "Failed to reuse local port {} for Kubernetes tunnel: {}",
+                port, e
+            )
+        })?;
+        return Ok(listener.local_addr().unwrap().port());
     }
 
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|e| {
@@ -94,17 +88,27 @@ pub fn reuse_or_discard_dead(key: &K8sTunnelKey) -> Result<u16, Option<u16>> {
     }
 }
 
-/// Insert `tunnel` for `key`, stopping any tunnel that was displaced by a
-/// concurrent respawn (std `Child` does not kill on drop).
-pub fn insert_tunnel(key: K8sTunnelKey, tunnel: K8sTunnel) {
+/// Publish `tunnel` for `key` and return the cached local port.
+///
+/// Keep an already-live tunnel when concurrent creators race to publish.
+/// Stop the redundant child and return the surviving port to every caller.
+pub fn insert_tunnel(key: K8sTunnelKey, tunnel: K8sTunnel) -> u16 {
     let mut tunnels = get_tunnels().lock().unwrap();
-    if let Some(displaced) = tunnels.insert(key, tunnel) {
-        log::warn!(
-            "Stopping displaced K8s tunnel on port {} after concurrent respawn",
-            displaced.local_port
+    if let Some(existing) = tunnels.get(&key).filter(|existing| existing.is_alive()) {
+        let local_port = existing.local_port;
+        log::debug!(
+            "Reusing concurrently created K8s tunnel on port {}; stopping redundant tunnel on port {}",
+            local_port,
+            tunnel.local_port
         );
+        tunnel.stop();
+        return local_port;
+    }
+    let local_port = tunnel.local_port;
+    if let Some(displaced) = tunnels.insert(key, tunnel) {
         displaced.stop();
     }
+    local_port
 }
 
 impl K8sTunnel {
@@ -129,9 +133,8 @@ impl K8sTunnel {
         // Verify kubectl is available
         Self::verify_kubectl(options)?;
 
-        // Prefer the previous local port when replacing a dead tunnel so pools
-        // that still point at that port stay valid. Fall back to an ephemeral
-        // port if the preferred one is unavailable.
+        // Require the previous local port when replacing a dead tunnel so
+        // cached pools never point at a different endpoint after a respawn.
         let local_port = allocate_local_port(preferred_local_port)?;
         eprintln!("[K8s Tunnel] Assigned local port: {}", local_port);
 
