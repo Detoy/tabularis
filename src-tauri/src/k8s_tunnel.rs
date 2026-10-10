@@ -42,8 +42,10 @@ pub fn get_tunnels() -> &'static Mutex<HashMap<K8sTunnelKey, K8sTunnel>> {
 ///
 /// When `preferred` is set (replacing a dead tunnel), try that port first so
 /// existing connection pools that still point at it keep working. If the bind
-/// fails, fall back to an ephemeral port.
-fn allocate_local_port(preferred: Option<u16>) -> Result<u16, String> {
+/// fails, fall back to an ephemeral port. Callers avoid orphaning the preferred
+/// port across failed respawns by leaving the dead map entry until
+/// [`insert_tunnel`] succeeds (see [`reuse_or_discard_dead`]).
+pub(crate) fn allocate_local_port(preferred: Option<u16>) -> Result<u16, String> {
     if let Some(port) = preferred {
         match TcpListener::bind(("127.0.0.1", port)) {
             Ok(listener) => {
@@ -71,20 +73,21 @@ fn allocate_local_port(preferred: Option<u16>) -> Result<u16, String> {
 /// Look up a cached tunnel for `key`.
 ///
 /// - `Ok(local_port)` — an alive tunnel can be reused as-is.
-/// - `Err(Some(previous_local_port))` — a dead entry was removed; callers should
-///   respawn on that port so existing pools stay valid.
+/// - `Err(Some(previous_local_port))` — a dead entry is still cached; callers
+///   should respawn on that port so existing pools stay valid. The dead entry
+///   is left in place until [`insert_tunnel`] replaces it, so a failed respawn
+///   still remembers the previous port on the next attempt.
 /// - `Err(None)` — nothing cached; allocate a fresh ephemeral port.
 pub fn reuse_or_discard_dead(key: &K8sTunnelKey) -> Result<u16, Option<u16>> {
-    let mut tunnels = get_tunnels().lock().unwrap();
+    let tunnels = get_tunnels().lock().unwrap();
     match tunnels.get(key) {
         Some(tunnel) if tunnel.is_alive() => Ok(tunnel.local_port),
         Some(tunnel) => {
             let previous = tunnel.local_port;
             log::info!(
-                "Discarding dead K8s tunnel on port {}; kubectl port-forward exited",
+                "Cached K8s tunnel on port {} is dead; keeping map entry until replacement is inserted",
                 previous
             );
-            tunnels.remove(key);
             Err(Some(previous))
         }
         None => Err(None),

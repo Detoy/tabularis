@@ -654,6 +654,22 @@ fn is_loopback_host(host: &str) -> bool {
 }
 
 /// Resolve connection params and set connection_id for stable pooling
+
+/// Resolve params for closing a pool without respawning tunnels.
+///
+/// `build_connection_key` uses `connection_id` (plus driver/database/TLS), not
+/// the K8s local port, so closing never needs a live kubectl port-forward.
+pub(crate) fn params_for_pool_close(
+    params: &ConnectionParams,
+    connection_id: &str,
+) -> Result<ConnectionParams, String> {
+    let mut for_close = params.clone();
+    if for_close.k8s_enabled.unwrap_or(false) {
+        for_close.k8s_enabled = Some(false);
+    }
+    resolve_connection_params_with_id(&for_close, connection_id)
+}
+
 pub fn resolve_connection_params_with_id(
     params: &ConnectionParams,
     connection_id: &str,
@@ -5901,8 +5917,10 @@ pub async fn disconnect_connection<R: Runtime>(
             .await;
     }
     let expanded_params = expand_ssh_connection_params(&app, &saved_conn.params).await?;
-    let expanded_params = expand_k8s_connection_params(&app, &expanded_params).await?;
-    let params = resolve_connection_params_with_id(&expanded_params, &connection_id)?;
+    // Pool keys depend on connection_id (not the tunnel local port), so skip
+    // K8s expansion here. A dead kubectl / unreachable cluster must not block
+    // close_pool_with_id or emit_active_changed via `?` on K8sTunnel::new.
+    let params = params_for_pool_close(&expanded_params, &connection_id)?;
 
     release_connection_sessions(&app, &connection_id, Some(&params)).await;
 

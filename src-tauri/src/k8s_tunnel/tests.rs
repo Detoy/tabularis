@@ -4,6 +4,17 @@ use crate::models::{ConnectionParams, K8sConnection};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
+/// Serialize every test that touches the process-wide `TUNNELS` map.
+/// Both `stop_all_tunnels_tests` and `reuse_or_discard_dead_tests` call
+/// `stop_all_tunnels()`, so they must share one lock — separate
+/// `OnceLock`s race under `--test-threads > 1`.
+#[cfg(unix)]
+fn tunnels_map_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+
 mod build_tunnel_key_tests {
     use super::*;
 
@@ -519,11 +530,10 @@ mod is_alive_tests {
 mod stop_all_tunnels_tests {
     use super::*;
     use std::process::{Command, Stdio};
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::{Arc, Mutex};
 
     fn map_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        super::tunnels_map_lock()
     }
 
     fn stub_tunnel(script: &str, local_port: u16) -> K8sTunnel {
@@ -595,11 +605,10 @@ mod stop_all_tunnels_tests {
 mod reuse_or_discard_dead_tests {
     use super::*;
     use std::process::{Command, Stdio};
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::{Arc, Mutex};
 
     fn map_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        super::tunnels_map_lock()
     }
 
     fn stub_tunnel(script: &str, local_port: u16) -> K8sTunnel {
@@ -644,7 +653,7 @@ mod reuse_or_discard_dead_tests {
     }
 
     #[test]
-    fn dead_entry_gets_removed_and_returns_previous_port() {
+    fn dead_entry_returns_previous_port_but_stays_until_insert() {
         let _guard = map_lock().lock().unwrap();
         stop_all_tunnels();
         let key = test_key("dead");
@@ -656,8 +665,22 @@ mod reuse_or_discard_dead_tests {
             tunnels.insert(key.clone(), tunnel);
         }
 
+        // Dead entry is kept so a failed respawn still remembers the port.
         assert_eq!(reuse_or_discard_dead(&key), Err(Some(54332)));
-        assert!(!get_tunnels().lock().unwrap().contains_key(&key));
+        assert!(get_tunnels().lock().unwrap().contains_key(&key));
+        // A second peek still returns the same previous port.
+        assert_eq!(reuse_or_discard_dead(&key), Err(Some(54332)));
+
+        // Only insert_tunnel removes/replaces it.
+        let replacement = stub_tunnel("sleep 30", 54332);
+        insert_tunnel(key.clone(), replacement);
+        assert_eq!(
+            get_tunnels().lock().unwrap().get(&key).unwrap().local_port,
+            54332
+        );
+        assert_eq!(reuse_or_discard_dead(&key), Ok(54332));
+
+        stop_all_tunnels();
     }
 
     #[test]
@@ -699,5 +722,37 @@ mod reuse_or_discard_dead_tests {
         assert!(exited, "displaced stub child still running after insert_tunnel");
 
         stop_all_tunnels();
+    }
+}
+
+mod allocate_local_port_tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn preferred_port_is_used_when_free() {
+        // Bind then drop so we know a free port, then ask allocate for it.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        assert_eq!(allocate_local_port(Some(port)).unwrap(), port);
+    }
+
+    #[test]
+    fn preferred_port_falls_back_when_taken() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let taken = listener.local_addr().unwrap().port();
+        // Keep listener alive so the preferred port is occupied.
+        let allocated = allocate_local_port(Some(taken)).unwrap();
+        assert_ne!(allocated, taken);
+        assert!(allocated > 0);
+        drop(listener);
+    }
+
+    #[test]
+    fn none_allocates_an_ephemeral_port() {
+        let port = allocate_local_port(None).unwrap();
+        assert!(port > 0);
     }
 }
