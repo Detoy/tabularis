@@ -302,7 +302,7 @@ jobs:
         env:
           PACKAGE_MANAGER_SRC: winget
           PACKAGE_MANAGER_NAME: winget
-        run: pnpm tauri build --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'
+        run: pnpm tauri build --bundles nsis --config src-tauri/tauri.winget.conf.json
 
       - name: Upload WinGet-managed installer
         if: matrix.platform == 'windows-latest' && !inputs.preview && !inputs.prerelease
