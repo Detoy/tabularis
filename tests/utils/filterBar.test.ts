@@ -32,6 +32,48 @@ const makeColumn = (name: string, data_type: string): TableColumn => ({
   is_auto_increment: false,
 });
 
+describe("filter string literals with backslashes", () => {
+  const filter = (value: string): StructuredFilter => ({
+    id: "path", column: "name", operator: "=", value,
+  });
+
+  it.each(["mysql", "mariadb"])("escapes typed and picked values for %s", (driver) => {
+    for (const value of ["a\\", "C:\\new", "x\\'quoted", 'a\\"b', "\\0\\r\\t\\Z"]) {
+      const literal = `'${value.replace(/\\/g, "\\\\").replace(/'/g, "''")}'`;
+      expect(buildSingleFilterClause(filter(value), driver)).toBe(`name = ${literal}`);
+      expect(buildSingleFilterClause(filter(formatPickedValue(value, "text")), driver))
+        .toBe(`name = ${literal}`);
+    }
+  });
+
+  it.each(["mysql", "mariadb"])("keeps picked IN values inside their literals for %s", (driver) => {
+    const values = ["x\\", ") OR 1=1 #", "O'Hare\\, TX"];
+    const picked = applyPickedValues(filter(""), values, "text");
+    expect(buildSingleFilterClause(picked, driver)).toBe(
+      "name IN ('x\\\\', ') OR 1=1 #', 'O''Hare\\\\, TX')",
+    );
+    expect(buildSingleFilterClause({ ...picked, operator: "NOT IN" }, driver)).toBe(
+      "name NOT IN ('x\\\\', ') OR 1=1 #', 'O''Hare\\\\, TX')",
+    );
+  });
+
+  it.each(["postgres", "sqlite", "mssql"])("preserves literal backslashes for %s", (driver) => {
+    const value = "C:\\new\\";
+    expect(buildSingleFilterClause(filter(value), driver)).toBe("name = 'C:\\new\\'");
+    expect(buildSingleFilterClause(filter(formatPickedValue(value, "text")), driver))
+      .toBe("name = 'C:\\new\\'");
+  });
+
+  it("uses the declared plugin dialect and covers BETWEEN and quoted inputs", () => {
+    const driver = { sql_dialect: "mysql" } as DriverCapabilities;
+    expect(buildSingleFilterClause(filter("'a\\'"), driver)).toBe("name = 'a\\\\'");
+    expect(buildSingleFilterClause(filter('"a\\"'), driver)).toBe('name = "a\\\\"');
+    expect(buildSingleFilterClause({ ...filter("a\\"), operator: "BETWEEN", value2: "C:\\new" }, driver))
+      .toBe("name BETWEEN 'a\\\\' AND 'C:\\\\new'");
+    expect(buildSingleFilterClause(filter("123"), driver)).toBe("name = 123");
+  });
+});
+
 describe("filterBar utils", () => {
   describe("filterColumnSuggestions", () => {
     const columns: TableColumn[] = [

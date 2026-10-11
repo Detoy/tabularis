@@ -216,20 +216,28 @@ export function buildSingleFilterClause(
   }
 
   if (op === "BETWEEN") {
-    const v1 = quoteIfNeeded(filter.value);
-    const v2 = quoteIfNeeded(filter.value2 ?? "");
+    const v1 = quoteValue(filter.value);
+    const v2 = quoteValue(filter.value2 ?? "");
     return `${col} BETWEEN ${v1} AND ${v2}`;
   }
 
   if (op === "IN" || op === "NOT IN") {
     const values = splitInList(filter.value)
-      .map((v) => quoteIfNeeded(v))
+      .map((v) => quoteValue(v))
       .join(", ");
     return `${col} ${op} (${values})`;
   }
 
-  const val = quoteIfNeeded(filter.value);
+  const val = quoteValue(filter.value);
   return `${col} ${op} ${val}`;
+
+  function quoteValue(value: string): string {
+    // Escape at clause construction, including values the picker already quoted.
+    // Stored filter values stay dialect-independent when the picker reopens.
+    return quoteIfNeeded(
+      usesBackslashStringEscapes(driver) ? value.replace(/\\/g, "\\\\") : value,
+    );
+  }
 }
 
 /**
