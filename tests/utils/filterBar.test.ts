@@ -64,6 +64,22 @@ describe("filter string literals with backslashes", () => {
       .toBe("name = 'C:\\new\\'");
   });
 
+  it.each(["mysql", "mariadb", "postgres", "sqlite", "mssql"])(
+    "combines double-quoted IN text with literal backslashes for %s",
+    (driver) => {
+      const value = '"C:\\new", "a\\", "O""Brien, TX", "", " padded", "007"';
+      const slash = driver === "mysql" || driver === "mariadb" ? "\\\\" : "\\";
+      for (const operator of ["IN", "NOT IN"] as const) {
+        expect(buildSingleFilterClause({ ...filter(value), operator }, driver)).toBe(
+          `name ${operator} ('C:${slash}new', 'a${slash}', 'O"Brien, TX', '', ' padded', '007')`,
+        );
+      }
+      expect(getPickedValues({ ...filter(value), operator: "IN" })).toEqual([
+        "C:\\new", "a\\", 'O"Brien, TX', "", " padded", "007",
+      ]);
+    },
+  );
+
   it("uses the declared plugin dialect and covers BETWEEN and quoted inputs", () => {
     const driver = { sql_dialect: "mysql" } as DriverCapabilities;
     expect(buildSingleFilterClause(filter("'a\\'"), driver)).toBe("name = 'a\\\\'");
@@ -354,6 +370,55 @@ describe("filterBar utils", () => {
         value: "a,, '', b,",
       };
       expect(buildSingleFilterClause(filter)).toBe("code IN ('a', '', 'b')");
+    });
+
+    it("does not split quoted commas or doubled single quotes in IN values", () => {
+      const filter: StructuredFilter = {
+        id: "1",
+        column: "city",
+        operator: "IN",
+        value: "'New York, NY', 'O''Brien', west",
+      };
+      expect(buildSingleFilterClause(filter))
+        .toBe("city IN ('New York, NY', 'O''Brien', 'west')");
+    });
+
+    it("splits unquoted apostrophes and inch marks without merging later items", () => {
+      const filter: StructuredFilter = {
+        id: "1", column: "name", operator: "IN", value: "O'Brien, Smith",
+      };
+      expect(buildSingleFilterClause(filter))
+        .toBe("name IN ('O''Brien', 'Smith')");
+      expect(buildSingleFilterClause({ ...filter, value: "it's, ok" }))
+        .toBe("name IN ('it''s', 'ok')");
+      expect(buildSingleFilterClause({ ...filter, value: '5" screen, 7" screen' }))
+        .toBe('name IN (\'5" screen\', \'7" screen\')');
+    });
+
+    it("preserves explicitly quoted empty strings but drops blank IN entries", () => {
+      const filter: StructuredFilter = {
+        id: "1",
+        column: "status",
+        operator: "NOT IN",
+        value: " , '', ,active, ",
+      };
+      expect(buildSingleFilterClause(filter)).toBe("status NOT IN ('', 'active')");
+      expect(isFilterComplete({ ...filter, value: " , '' " })).toBe(true);
+      expect(isFilterComplete({ ...filter, value: " , , " })).toBe(false);
+    });
+
+    it("treats double-quoted text values as strings, not SQL identifiers", () => {
+      const filter: StructuredFilter = {
+        id: "1",
+        column: "city",
+        operator: "IN",
+        value: '"New York, NY", "O""Brien"',
+      };
+      expect(buildSingleFilterClause(filter))
+        .toBe("city IN ('New York, NY', 'O\"Brien')");
+      expect(buildSingleFilterClause({
+        ...filter, operator: "=", value: '"New York"',
+      })).toBe('city = "New York"');
     });
 
     it("should build NOT IN clause", () => {

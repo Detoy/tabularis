@@ -320,7 +320,7 @@ pub async fn get_columns(
     let text = resolve_text_proto(&pool, params).await?;
 
     let query = r#"
-        SELECT column_name, data_type, column_type, column_key, is_nullable, extra, column_default, CAST(character_maximum_length AS UNSIGNED), NULLIF(column_comment, '')
+        SELECT column_name, data_type, column_type, column_key, is_nullable, extra, column_default, CAST(character_maximum_length AS UNSIGNED), NULLIF(column_comment, ''), CAST(numeric_precision AS SIGNED), CAST(numeric_scale AS SIGNED)
         FROM information_schema.columns
         WHERE table_schema = ? AND table_name = ?
         ORDER BY ordinal_position
@@ -339,6 +339,16 @@ pub async fn get_columns(
             let extra = mysql_row_str(r, 5);
             let default_val = mysql_row_str_opt(r, 6);
             let character_maximum_length = mysql_row_max_length(r, 7, &column_name);
+            let numeric_precision: Option<i32> = r
+                .try_get::<Option<i64>, _>(9)
+                .ok()
+                .flatten()
+                .and_then(|v| i32::try_from(v).ok());
+            let numeric_scale: Option<i32> = r
+                .try_get::<Option<i64>, _>(10)
+                .ok()
+                .flatten()
+                .and_then(|v| i32::try_from(v).ok());
 
             // For ENUM and SET, `data_type` returns only the base name (e.g. "enum"),
             // while `column_type` returns the full definition with allowed values
@@ -371,6 +381,8 @@ pub async fn get_columns(
                 is_generated: false,
                 default_value,
                 character_maximum_length,
+                numeric_precision,
+                numeric_scale,
                 comment: mysql_row_str_opt(r, 8),
             }
         })
@@ -398,7 +410,8 @@ pub async fn get_foreign_keys(
             kcu.REFERENCED_TABLE_NAME,
             kcu.REFERENCED_COLUMN_NAME,
             rc.UPDATE_RULE,
-            rc.DELETE_RULE
+            rc.DELETE_RULE,
+            CAST(kcu.ORDINAL_POSITION AS SIGNED)
         FROM information_schema.KEY_COLUMN_USAGE kcu
         JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
         ON kcu.CONSTRAINT_NAME = rc.CONSTRAINT_NAME
@@ -427,6 +440,14 @@ pub async fn get_foreign_keys(
             ref_column: mysql_row_str(r, 3),
             on_update: mysql_row_str_opt(r, 4),
             on_delete: mysql_row_str_opt(r, 5),
+            // ORDINAL_POSITION is 1-based position within the key (#840).
+            // CAST AS SIGNED so sqlx decodes it as i64 (the column is bigint
+            // unsigned in information_schema).
+            seq_in_fk: r
+                .try_get::<Option<i64>, _>(6)
+                .ok()
+                .flatten()
+                .and_then(|v| i32::try_from(v).ok()),
         })
         .collect())
 }
@@ -442,7 +463,7 @@ pub async fn get_all_columns_batch(
     let text = resolve_text_proto(&pool, params).await?;
 
     let query = r#"
-        SELECT table_name, column_name, data_type, column_type, column_key, is_nullable, extra, column_default, CAST(character_maximum_length AS UNSIGNED), NULLIF(column_comment, '')
+        SELECT table_name, column_name, data_type, column_type, column_key, is_nullable, extra, column_default, CAST(character_maximum_length AS UNSIGNED), NULLIF(column_comment, ''), CAST(numeric_precision AS SIGNED), CAST(numeric_scale AS SIGNED)
         FROM information_schema.columns
         WHERE table_schema = ?
         ORDER BY table_name, ordinal_position
@@ -462,6 +483,16 @@ pub async fn get_all_columns_batch(
         let extra = mysql_row_str(row, 6);
         let default_val = mysql_row_str_opt(row, 7);
         let character_maximum_length = mysql_row_max_length(row, 8, &column_name);
+        let numeric_precision: Option<i32> = row
+            .try_get::<Option<i64>, _>(10)
+            .ok()
+            .flatten()
+            .and_then(|v| i32::try_from(v).ok());
+        let numeric_scale: Option<i32> = row
+            .try_get::<Option<i64>, _>(11)
+            .ok()
+            .flatten()
+            .and_then(|v| i32::try_from(v).ok());
 
         // For ENUM and SET, `data_type` returns only the base name (e.g. "enum"),
         // while `column_type` returns the full definition with allowed values
@@ -494,6 +525,8 @@ pub async fn get_all_columns_batch(
             is_generated: false,
             default_value,
             character_maximum_length,
+            numeric_precision,
+            numeric_scale,
             comment: mysql_row_str_opt(row, 9),
         };
 
@@ -524,7 +557,8 @@ pub async fn get_all_foreign_keys_batch(
             kcu.REFERENCED_TABLE_NAME,
             kcu.REFERENCED_COLUMN_NAME,
             rc.UPDATE_RULE,
-            rc.DELETE_RULE
+            rc.DELETE_RULE,
+            CAST(kcu.ORDINAL_POSITION AS SIGNED)
         FROM information_schema.KEY_COLUMN_USAGE kcu
         JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
         ON kcu.CONSTRAINT_NAME = rc.CONSTRAINT_NAME
@@ -548,6 +582,11 @@ pub async fn get_all_foreign_keys_batch(
             ref_column: mysql_row_str(row, 4),
             on_update: mysql_row_str_opt(row, 5),
             on_delete: mysql_row_str_opt(row, 6),
+            seq_in_fk: row
+                .try_get::<Option<i64>, _>(7)
+                .ok()
+                .flatten()
+                .and_then(|v| i32::try_from(v).ok()),
         };
 
         result.entry(table_name).or_insert_with(Vec::new).push(fk);
@@ -1129,7 +1168,7 @@ pub async fn get_view_columns(
     let text = resolve_text_proto(&pool, params).await?;
 
     let query = r#"
-            SELECT column_name, data_type, column_type, column_key, is_nullable, extra, column_default, CAST(character_maximum_length AS UNSIGNED)
+            SELECT column_name, data_type, column_type, column_key, is_nullable, extra, column_default, CAST(character_maximum_length AS UNSIGNED), CAST(numeric_precision AS SIGNED), CAST(numeric_scale AS SIGNED)
             FROM information_schema.columns
             WHERE table_schema = ? AND table_name = ?
             ORDER BY ordinal_position
@@ -1148,6 +1187,16 @@ pub async fn get_view_columns(
             let extra = mysql_row_str(r, 5);
             let default_val = mysql_row_str_opt(r, 6);
             let character_maximum_length = mysql_row_max_length(r, 7, &column_name);
+            let numeric_precision: Option<i32> = r
+                .try_get::<Option<i64>, _>(8)
+                .ok()
+                .flatten()
+                .and_then(|v| i32::try_from(v).ok());
+            let numeric_scale: Option<i32> = r
+                .try_get::<Option<i64>, _>(9)
+                .ok()
+                .flatten()
+                .and_then(|v| i32::try_from(v).ok());
 
             // For ENUM and SET, `data_type` returns only the base name (e.g. "enum"),
             // while `column_type` returns the full definition with allowed values
@@ -1180,6 +1229,8 @@ pub async fn get_view_columns(
                 is_generated: false,
                 default_value,
                 character_maximum_length,
+                numeric_precision,
+                numeric_scale,
                 comment: None,
             }
         })

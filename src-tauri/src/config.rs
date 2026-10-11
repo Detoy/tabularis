@@ -1076,6 +1076,7 @@ pub fn get_config_json(app: AppHandle) -> Result<String, String> {
 
 #[tauri::command]
 pub fn relaunch_app(app: AppHandle) {
+    crate::window_placement::persist_cached(&app);
     app.restart();
 }
 
