@@ -2827,18 +2827,31 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
     async (sql: string): Promise<QueryResult> => {
       const tabId = activeTabIdRef.current;
       const currentTab = tabsRef.current.find((tb) => tb.id === tabId);
-      if (!activeConnectionId || !currentTab) {
+      if (!currentTab || currentTab.connectionId !== activeConnectionIdRef.current) {
         throw new Error("No active connection");
       }
+      const connectionId = currentTab.connectionId;
       const schema = currentTab.schema ?? activeSchema;
-      return invoke<QueryResult>("execute_query", {
-        connectionId: activeConnectionId,
-        query: sql,
-        sessionId: currentTab.id,
-        ...(schema ? { schema } : {}),
+      const table = currentTab.activeTable;
+      const result = await getAutoRefreshSchedule(currentTab.id).run(async () => {
+        const targetTab = tabsRef.current.find((tab) => tab.id === currentTab.id);
+        if (!targetTab || activeTabIdRef.current !== currentTab.id ||
+          activeConnectionIdRef.current !== connectionId ||
+          targetTab.connectionId !== connectionId || targetTab.activeTable !== table ||
+          (targetTab.schema ?? activeSchema) !== schema) {
+          throw new Error("The table changed before the values query could run");
+        }
+        return invoke<QueryResult>("execute_query", {
+          connectionId,
+          query: sql,
+          sessionId: currentTab.id,
+          ...(schema ? { schema } : {}),
+        });
       });
+      if (!result) throw new Error("The values query did not run");
+      return result;
     },
-    [activeConnectionId, activeSchema],
+    [activeSchema, getAutoRefreshSchedule],
   );
 
   const handleForeignKeyShowPanel = useCallback(
@@ -5008,6 +5021,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
               placeholderSort={placeholders.sort}
               defaultLimit={settings.resultPageSize || 100}
               columnMetadata={activeTab?.columnMetadata}
+              tableName={activeTab?.activeTable}
               onUpdate={handleToolbarUpdate}
               onRefresh={handleRefresh}
               refreshDisabled={!!activeTab.isLoading || refreshBlockedByEdits || refreshSnapshot.editing}
@@ -5018,7 +5032,6 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
               }}
               autoRefreshPaused={!!activeTab.autoRefreshIntervalMs && (refreshBlockedByEdits || refreshSnapshot.editing || refreshBlockedBySelection)}
               autoRefreshPausedReason={refreshBlockedByEdits || refreshSnapshot.editing ? "editing" : "selection"}
-              tableName={activeTab.activeTable}
               tableSchema={activeTab.schema}
               onRunQuery={runToolbarQuery}
             />

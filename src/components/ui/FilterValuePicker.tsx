@@ -58,6 +58,8 @@ export const FilterValuePicker = ({
   const dialogId = useId();
   const titleId = useId();
 
+  useEffect(() => () => { requestId.current++; }, []);
+
   const close = useCallback((restoreFocus = false) => {
     requestId.current++;
     setPosition(undefined);

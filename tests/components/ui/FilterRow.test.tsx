@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { act, render, screen, fireEvent } from "@testing-library/react";
 import { FilterRow } from "../../../src/components/ui/FilterRow";
 import type { StructuredFilter } from "../../../src/utils/filterBar";
 import type { TableColumn } from "../../../src/types/editor";
@@ -114,4 +114,38 @@ describe("FilterRow value picker", () => {
       value: "'007'",
     });
   });
+  it("discards pending values when the row changes and uses the current row on reopen", async () => {
+    let resolveOld!: (value: { value: string; count: number }[]) => void;
+    const oldRequest = new Promise<{ value: string; count: number }[]>((resolve) => { resolveOld = resolve; });
+    const onLoadValues = vi.fn().mockReturnValueOnce(oldRequest)
+      .mockResolvedValue([{ value: "8", count: 2 }]);
+    const props = { columns, onChange: vi.fn(), onRemove: vi.fn(), onApplySingle: vi.fn(),
+      onDuplicate: vi.fn(), onEscape: vi.fn(), isApplied: false, onTriggerApplied: vi.fn(), onLoadValues };
+    const { rerender } = render(<FilterRow {...props} filter={base} valuePickerContextKey="orders" />);
+    fireEvent.click(pickerButton()!);
+    const next = { ...base, column: "qty", value: "7" };
+    rerender(<FilterRow {...props} filter={next} valuePickerContextKey="orders" />);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    fireEvent.click(pickerButton()!);
+    await act(async () => { resolveOld([{ value: "stale", count: 10 }]); });
+    expect(screen.queryByRole("checkbox", { name: /stale/ })).not.toBeInTheDocument();
+    fireEvent.click(await screen.findByRole("checkbox", { name: /8/ }));
+    fireEvent.click(screen.getByRole("button", { name: /toolbar.valuePicker.use/ }));
+    expect(onLoadValues).toHaveBeenLastCalledWith(next);
+    expect(props.onChange).toHaveBeenCalledWith({ ...next, value: "8" });
+  });
+
+  it("keeps the picker open across unrelated renders but closes it when query context changes", async () => {
+    const props = { columns, filter: base, onChange: vi.fn(), onRemove: vi.fn(), onApplySingle: vi.fn(),
+      onDuplicate: vi.fn(), onEscape: vi.fn(), isApplied: false, onTriggerApplied: vi.fn(),
+      onLoadValues: vi.fn().mockResolvedValue([{ value: "open", count: 1 }]) };
+    const { rerender } = render(<FilterRow {...props} valuePickerContextKey="connection-a" />);
+    fireEvent.click(pickerButton()!);
+    await screen.findByRole("checkbox", { name: /^open/ });
+    rerender(<FilterRow {...props} isApplied valuePickerContextKey="connection-a" />);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    rerender(<FilterRow {...props} valuePickerContextKey="connection-b" />);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
 });

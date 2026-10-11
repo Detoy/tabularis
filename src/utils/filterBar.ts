@@ -290,9 +290,37 @@ function quoteIfNeeded(value: string): string {
   return quoteLiteral(value);
 }
 
+/** Operators that take no value: the value input is hidden and never read. */
+export const NO_VALUE_OPS: FilterOperator[] = [
+  "IS NULL",
+  "IS NOT NULL",
+  "is empty",
+  "is not empty",
+];
+
+/**
+ * Whether a filter has everything its operator needs to produce a valid clause.
+ * Operators in NO_VALUE_OPS need no value; BETWEEN needs both bounds; IN / NOT IN
+ * need at least one non-empty item; every other operator needs a value. Values
+ * made only of whitespace count as empty.
+ */
+export function isFilterComplete(filter: StructuredFilter): boolean {
+  if (NO_VALUE_OPS.includes(filter.operator)) return true;
+  switch (filter.operator) {
+    case "BETWEEN":
+      return filter.value.trim() !== "" && (filter.value2 ?? "").trim() !== "";
+    case "IN":
+    case "NOT IN":
+      return filter.value.split(",").some((v) => v.trim() !== "");
+    default:
+      return filter.value.trim() !== "";
+  }
+}
+
 /**
  * Builds a complete WHERE clause string from an array of StructuredFilter joined
- * by the given combinator (AND by default). OR output with several clauses is
+ * by the given combinator (AND by default). Disabled and incomplete filters
+ * (e.g. the empty row added when the panel opens) are ignored. OR output with several clauses is
  * wrapped in parentheses so it composes safely with other clauses.
  * Returns empty string if there is no active filter.
  */
@@ -303,7 +331,7 @@ export function buildStructuredFilterClause(
   quoteMode: FilterQuoteMode = "auto",
 ): string {
   const clauses = filters
-    .filter((f) => f.column && f.enabled !== false)
+    .filter((f) => f.column && f.enabled !== false && isFilterComplete(f))
     .map((f) => buildSingleFilterClause(f, driver, quoteMode));
   const joined = clauses.join(` ${combinator} `);
   return combinator === "OR" && clauses.length > 1 ? `(${joined})` : joined;
@@ -426,18 +454,6 @@ export function buildDistinctValuesQuery({
   );
 }
 
-/** True when a row has everything its operator needs to become a clause. */
-function isCompleteFilter(filter: StructuredFilter): boolean {
-  if (!filter.column || filter.enabled === false) return false;
-  if (NO_VALUE_OPERATORS.includes(filter.operator)) return true;
-  if (filter.operator === "BETWEEN") {
-    return filter.value.trim() !== "" && (filter.value2 ?? "").trim() !== "";
-  }
-  return filter.value.trim() !== "";
-}
-
-const NO_VALUE_OPERATORS: FilterOperator[] = ["IS NULL", "IS NOT NULL", "is empty", "is not empty"];
-
 /**
  * WHERE clause the value picker uses to narrow its counts: the other
  * enabled, complete rows of the panel. With "Match any" (OR) the other rows
@@ -450,7 +466,7 @@ export function buildValuePickerWhere(
   combinator: FilterCombinator,
 ): string {
   if (combinator === "OR") return "";
-  const others = filters.filter((f) => f.id !== excludeId && isCompleteFilter(f));
+  const others = filters.filter((f) => f.id !== excludeId);
   // Always quote columns so the WHERE matches buildDistinctValuesQuery
   // (quoteIdentifier), including MySQL reserved words like `order` / `group`.
   return buildStructuredFilterClause(others, driver, "AND", "always");
