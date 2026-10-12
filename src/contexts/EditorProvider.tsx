@@ -23,6 +23,7 @@ import {
   createSchemaCacheEntry,
 } from "../utils/editor";
 import { moveTab } from "../utils/tabDnd";
+import { getRecentTabIds as orderRecentTabs } from "../utils/tabScroll";
 import { createAutoRefreshSchedule, type AutoRefreshSchedule } from "../utils/autoRefresh";
 import {
   pushClosedTabs,
@@ -41,6 +42,24 @@ export const EditorProvider = ({ children }: { children: ReactNode }) => {
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeTabIds, setActiveTabIds] = useState<Record<string, string>>({});
   const [isLoading, setIsLoading] = useState(true);
+  const recentTabs = useRef<Record<string, string[]>>({});
+  const previewTabs = useRef<Record<string, string | null>>({});
+
+  // History is runtime-only and belongs to the connection, not an editor pane.
+  useEffect(() => {
+    for (const connectionId of Object.keys(recentTabs.current)) {
+      const open = tabs.filter((tab) => tab.connectionId === connectionId);
+      recentTabs.current[connectionId] = orderRecentTabs(open, recentTabs.current[connectionId]);
+    }
+    if (!activeConnectionId) return;
+    const open = tabs.filter((tab) => tab.connectionId === activeConnectionId);
+    const activeId = activeTabIds[activeConnectionId];
+    const history = recentTabs.current[activeConnectionId] ?? [];
+    const committed = activeId && previewTabs.current[activeConnectionId] !== activeId
+      ? [activeId, ...history]
+      : history;
+    recentTabs.current[activeConnectionId] = orderRecentTabs(open, committed);
+  }, [tabs, activeTabIds, activeConnectionId]);
 
   // Closed tabs per connection, for "reopen closed tab". The state mirrors
   // closedTabsRef (kept in sync immediately) so consumers re-render on
@@ -216,13 +235,26 @@ export const EditorProvider = ({ children }: { children: ReactNode }) => {
     : null;
 
   const setActiveTabId = useCallback(
-    (id: string | null) => {
+    (id: string | null, options?: { preview?: boolean }) => {
       if (activeConnectionId && id) {
+        previewTabs.current[activeConnectionId] = options?.preview ? id : null;
+        if (!options?.preview) {
+          const history = recentTabs.current[activeConnectionId] ?? [];
+          recentTabs.current[activeConnectionId] = [id, ...history.filter((entry) => entry !== id)];
+        }
         setActiveTabIds((prev) => ({ ...prev, [activeConnectionId]: id }));
       }
     },
     [activeConnectionId],
   );
+
+  const getRecentTabIds = useCallback(() => {
+    if (!activeConnectionId) return [];
+    return orderRecentTabs(
+      tabsRef.current.filter((tab) => tab.connectionId === activeConnectionId),
+      recentTabs.current[activeConnectionId] ?? [],
+    );
+  }, [activeConnectionId]);
 
   const addTab = useCallback(
     (partial?: Partial<Tab>) => {
@@ -543,6 +575,7 @@ export const EditorProvider = ({ children }: { children: ReactNode }) => {
       reorderTab,
       updateResultEntry,
       setActiveTabId,
+      getRecentTabIds,
       closeAllTabs,
       closeOtherTabs,
       closeTabsToLeft: closeTabsToLeftInternal,
@@ -563,6 +596,7 @@ export const EditorProvider = ({ children }: { children: ReactNode }) => {
       reorderTab,
       updateResultEntry,
       setActiveTabId,
+      getRecentTabIds,
       closeAllTabs,
       closeOtherTabs,
       closeTabsToLeftInternal,

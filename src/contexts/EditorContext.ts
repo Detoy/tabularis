@@ -48,7 +48,9 @@ export interface EditorContextType {
     entryId: string,
     partial: Partial<QueryResultEntry>,
   ) => void;
-  setActiveTabId: (id: string) => void;
+  /** Preview switches do not change MRU history until the selection is committed. */
+  setActiveTabId: (id: string, options?: { preview?: boolean }) => void;
+  getRecentTabIds: () => string[];
   getSchema: (connectionId: string, schemaVersion?: number, schema?: string) => Promise<TableSchema[]>;
 }
 

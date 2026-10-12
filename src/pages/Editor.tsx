@@ -101,6 +101,7 @@ import { NewRowModal } from "../components/modals/NewRowModal";
 import { QuerySelectionModal } from "../components/modals/QuerySelectionModal";
 import { ConfirmModal } from "../components/modals/ConfirmModal";
 import { ExplainSelectionModal } from "../components/modals/ExplainSelectionModal";
+import { useTabSwitcher } from "../hooks/useTabSwitcher";
 import { TabSwitcherModal } from "../components/modals/TabSwitcherModal";
 import { QueryModal } from "../components/modals/QueryModal";
 import { QueryParamsModal } from "../components/modals/QueryParamsModal";
@@ -198,7 +199,6 @@ import { RelatedRecordsPanel } from "../components/ui/RelatedRecordsPanel";
 import {
   getTabScrollState,
   getAdjacentTabIndex,
-  resolveNextTabId,
   isFocusedPane,
 } from "../utils/tabScroll";
 import { computeAutoScrollSpeed } from "../utils/notebookDnd";
@@ -273,6 +273,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
     closeTabsToLeft,
     closeTabsToRight,
     getAutoRefreshSchedule,
+    getRecentTabIds,
     reopenClosedTab,
     canReopenClosedTab,
   } = useEditor();
@@ -505,7 +506,14 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
     resolve: resolveDangerousQuery,
   } = useQueryGuards(activeConnectionId);
   const guardProductionWrite = useProductionGuard();
-  const [isTabSwitcherOpen, setIsTabSwitcherOpen] = useState(false);
+  const tabSwitcher = useTabSwitcher({
+    tabs,
+    activeTabId,
+    connectionId: activeConnectionId,
+    enabled: isFocusedPane(explorerConnectionId, activeConnectionId),
+    getRecentTabIds,
+    setActiveTabId,
+  });
   const [isRunDropdownOpen, setIsRunDropdownOpen] = useState(false);
   const [isDbDropdownOpen, setIsDbDropdownOpen] = useState(false);
   // Toolbar dropdowns close on outside mousedown instead of a fixed backdrop:
@@ -2666,30 +2674,6 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [handleRunButton, handleRunAll]);
-
-  // Global Ctrl+Tab shortcut: open tab switcher and advance to next tab circularly.
-  // In split mode only the focused pane (explorerConnectionId) handles the shortcut.
-  useEffect(() => {
-    const focused = isFocusedPane(explorerConnectionId, activeConnectionId);
-
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (!focused || !e.ctrlKey || e.key !== "Tab") return;
-      e.preventDefault();
-      setIsTabSwitcherOpen(true);
-      const nextId = resolveNextTabId(tabsRef.current, activeTabIdRef.current);
-      if (nextId !== null) setActiveTabId(nextId);
-    };
-    const handleKeyUp = (e: KeyboardEvent) => {
-      if (!focused || e.key !== "Control") return;
-      setIsTabSwitcherOpen(false);
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    window.addEventListener("keyup", handleKeyUp);
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown);
-      window.removeEventListener("keyup", handleKeyUp);
-    };
-  }, [explorerConnectionId, activeConnectionId, setActiveTabId]);
 
   // Cmd/Ctrl+T: new console tab; Cmd/Ctrl+Right: next page; Cmd/Ctrl+Left: prev page
   useEffect(() => {
@@ -5745,15 +5729,12 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
         }
       />
       <TabSwitcherModal
-        isOpen={isTabSwitcherOpen}
-        tabs={tabs}
+        isOpen={tabSwitcher.isOpen}
+        tabs={tabSwitcher.tabs}
         activeTabId={activeTabId}
-        onSelect={(tabId) => {
-          setActiveTabId(tabId);
-          setIsTabSwitcherOpen(false);
-        }}
+        onSelect={tabSwitcher.select}
         onClose={(tabId) => handleCloseTab(tabId)}
-        onDismiss={() => setIsTabSwitcherOpen(false)}
+        onDismiss={tabSwitcher.dismiss}
       />
       {saveQueryModal.isOpen && (
         <QueryModal
