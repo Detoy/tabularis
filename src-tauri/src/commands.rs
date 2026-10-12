@@ -651,8 +651,6 @@ fn is_loopback_host(host: &str) -> bool {
     h == "localhost" || h == "127.0.0.1" || h == "::1" || h == "[::1]"
 }
 
-/// Resolve connection params and set connection_id for stable pooling
-
 /// Resolve params for closing a pool without respawning tunnels.
 ///
 /// `build_connection_key` uses `connection_id` (plus driver/database/TLS), not
@@ -668,6 +666,7 @@ pub(crate) fn params_for_pool_close(
     resolve_connection_params_with_id(&for_close, connection_id)
 }
 
+/// Resolve connection params and set connection_id for stable pooling
 pub fn resolve_connection_params_with_id(
     params: &ConnectionParams,
     connection_id: &str,
