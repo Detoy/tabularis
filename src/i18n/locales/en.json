@@ -2198,7 +2198,7 @@
     "success": "{{count}} rows imported into \"{{table}}\"",
     "tableCreated": "New table created",
     "openTable": "Close",
-    "noData": "No data found in clipboard",
+    "noData": "No data found in the selected source",
     "retry": "Try again",
     "warningsCount": "{{count}} parsing warnings",
     "columnsLabel": "columns",

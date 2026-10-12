@@ -2179,7 +2179,7 @@
     "success": "{{count}} row ang na-import sa \"{{table}}\"",
     "tableCreated": "Gumawa ng bagong table",
     "openTable": "Isara",
-    "noData": "Walang data sa clipboard",
+    "noData": "Walang data sa napiling pinagmulan",
     "retry": "Subukan ulit",
     "warningsCount": "{{count}} parsing warning",
     "columnsLabel": "mga column",

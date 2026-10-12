@@ -2127,7 +2127,7 @@
     "success": "{{count}} 行を「{{table}}」にインポートしました",
     "tableCreated": "新規テーブルを作成しました",
     "openTable": "閉じる",
-    "noData": "クリップボードにデータが見つかりません",
+    "noData": "選択したソースにデータが見つかりません",
     "retry": "再試行",
     "warningsCount": "{{count}} 件の解析警告",
     "columnsLabel": "カラム",

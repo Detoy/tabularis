@@ -2123,7 +2123,7 @@
     "success": "\"{{table}}\"에 {{count}}개 행을 가져왔습니다",
     "tableCreated": "새 테이블이 생성되었습니다",
     "openTable": "닫기",
-    "noData": "클립보드에서 데이터를 찾을 수 없습니다",
+    "noData": "선택한 소스에서 데이터를 찾을 수 없습니다",
     "retry": "다시 시도",
     "warningsCount": "파싱 경고 {{count}}개",
     "columnsLabel": "컬럼",

@@ -2189,7 +2189,7 @@
     "success": "{{count}} lignes importées dans \"{{table}}\"",
     "tableCreated": "Nouvelle table créée",
     "openTable": "Fermer",
-    "noData": "Aucune donnée dans le presse-papiers",
+    "noData": "Aucune donnée trouvée dans la source sélectionnée",
     "retry": "Réessayer",
     "warningsCount": "{{count}} avertissements d'analyse",
     "columnsLabel": "colonnes",

@@ -2057,7 +2057,7 @@
     "success": "已将 {{count}} 行导入到 \"{{table}}\"",
     "tableCreated": "新表已创建",
     "openTable": "关闭",
-    "noData": "剪贴板中没有数据",
+    "noData": "所选来源中没有数据",
     "retry": "重试",
     "warningsCount": "{{count}} 条解析警告",
     "columnsLabel": "列",

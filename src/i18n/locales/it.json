@@ -2122,7 +2122,7 @@
     "success": "{{count}} righe importate in \"{{table}}\"",
     "tableCreated": "Nuova tabella creata",
     "openTable": "Chiudi",
-    "noData": "Nessun dato negli appunti",
+    "noData": "Nessun dato trovato nella sorgente selezionata",
     "retry": "Riprova",
     "warningsCount": "{{count}} avvisi di parsing",
     "columnsLabel": "colonne",

@@ -2163,7 +2163,7 @@
     "success": "{{count}} linhas importadas em \"{{table}}\"",
     "tableCreated": "Nova tabela criada",
     "openTable": "Fechar",
-    "noData": "Nenhum dado encontrado na área de transferência",
+    "noData": "Nenhum dado encontrado na fonte selecionada",
     "retry": "Tentar novamente",
     "warningsCount": "{{count}} avisos de análise",
     "columnsLabel": "colunas",

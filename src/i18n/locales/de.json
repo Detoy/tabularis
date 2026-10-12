@@ -2104,7 +2104,7 @@
     "success": "{{count}} Zeilen in \"{{table}}\" importiert",
     "tableCreated": "Neue Tabelle erstellt",
     "openTable": "Schließen",
-    "noData": "Keine Daten in der Zwischenablage",
+    "noData": "Keine Daten in der ausgewählten Quelle gefunden",
     "retry": "Erneut versuchen",
     "warningsCount": "{{count}} Parser-Warnungen",
     "columnsLabel": "Spalten",
