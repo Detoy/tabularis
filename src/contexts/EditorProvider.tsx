@@ -44,12 +44,27 @@ export const EditorProvider = ({ children }: { children: ReactNode }) => {
   const [isLoading, setIsLoading] = useState(true);
   const recentTabs = useRef<Record<string, string[]>>({});
   const previewTabs = useRef<Record<string, string | null>>({});
+  const historySnapshot = useRef<{
+    tabKey: string;
+    activeIds: Record<string, string>;
+    connectionId: string | null;
+  } | null>(null);
 
   // History is runtime-only and belongs to the connection, not an editor pane.
   useEffect(() => {
-    for (const connectionId of Object.keys(recentTabs.current)) {
-      const open = tabs.filter((tab) => tab.connectionId === connectionId);
-      recentTabs.current[connectionId] = orderRecentTabs(open, recentTabs.current[connectionId]);
+    const tabKey = JSON.stringify(tabs.map((tab) => [tab.connectionId, tab.id]));
+    const previous = historySnapshot.current;
+    const tabsChanged = previous?.tabKey !== tabKey;
+    if (!tabsChanged && previous?.activeIds === activeTabIds && previous.connectionId === activeConnectionId) return;
+    historySnapshot.current = { tabKey, activeIds: activeTabIds, connectionId: activeConnectionId };
+    // Result updates do not affect history. Prune all connections only when
+    // the open tabs change, including tabs removed from an inactive connection.
+    if (tabsChanged) {
+      for (const connectionId of Object.keys(recentTabs.current)) {
+        if (connectionId === activeConnectionId) continue;
+        const open = tabs.filter((tab) => tab.connectionId === connectionId);
+        recentTabs.current[connectionId] = orderRecentTabs(open, recentTabs.current[connectionId]);
+      }
     }
     if (!activeConnectionId) return;
     const open = tabs.filter((tab) => tab.connectionId === activeConnectionId);
@@ -235,7 +250,7 @@ export const EditorProvider = ({ children }: { children: ReactNode }) => {
     : null;
 
   const setActiveTabId = useCallback(
-    (id: string | null, options?: { preview?: boolean }) => {
+    (id: string, options?: { preview?: boolean }) => {
       if (activeConnectionId && id) {
         previewTabs.current[activeConnectionId] = options?.preview ? id : null;
         if (!options?.preview) {

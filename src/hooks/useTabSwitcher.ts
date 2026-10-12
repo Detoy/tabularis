@@ -40,11 +40,15 @@ export function useTabSwitcher(options: TabSwitcherOptions) {
     if (!enabled || !connectionId) return;
     const handleKeyDown = (event: KeyboardEvent) => {
       if (!event.ctrlKey || event.altKey || event.metaKey || event.key !== "Tab") return;
-      const { tabs, activeTabId, getRecentTabIds: history } = latest.current;
+      const { tabs, activeTabId, getRecentTabIds: getHistory } = latest.current;
       if (!tabs.length) return;
       event.preventDefault();
       if (!session.current) {
-        session.current = { order: getRecentTabIds(tabs, [activeTabId ?? "", ...history()]), selectedId: activeTabId };
+        // Pin the current tab first even if activation preceded history's effect.
+        session.current = {
+          order: getRecentTabIds(tabs, [activeTabId ?? "", ...getHistory()]),
+          selectedId: activeTabId,
+        };
       }
       const current = session.current;
       current.order = getRecentTabIds(tabs, current.order);
