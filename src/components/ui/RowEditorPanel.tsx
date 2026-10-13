@@ -56,7 +56,10 @@ export const RowEditorPanel = ({
 	onTogglePin,
 }: RowEditorPanelProps) => {
 	const { t } = useTranslation();
-	const { activeDriver } = useDatabase();
+	const { connectionDataMap } = useDatabase();
+	// The sidebar is outside the pane provider. Its row can belong to a
+	// different connection than the globally active one.
+	const rowDriver = connectionId ? connectionDataMap[connectionId]?.driver ?? null : null;
 	const { editedData, updateField } = useRowEditor({
 		initialData: rowData,
 		onChange: (fieldName, value) => onChange(fieldName, value),
@@ -114,7 +117,7 @@ export const RowEditorPanel = ({
 							connectionId: connectionId ?? null,
 							tableName: tableName ?? null,
 							schema: schema ?? null,
-							driver: activeDriver,
+							driver: rowDriver,
 							rowData,
 							rowIndex,
 							isInsertion,
@@ -192,7 +195,7 @@ export const RowEditorPanel = ({
 									connectionId: connectionId ?? null,
 									tableName: tableName ?? null,
 									schema: schema ?? null,
-									driver: activeDriver,
+									driver: rowDriver,
 									columnName: column.name,
 									rowData: editedData,
 									rowIndex,
