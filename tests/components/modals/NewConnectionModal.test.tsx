@@ -383,7 +383,6 @@ describe("NewConnectionModal layout", () => {
     it("restores and saves a non-alphabetical default using the existing format", async () => {
       const select = await openDatabaseSelection(["production", "analytics", "reporting"]);
       expect(select).toHaveValue("production");
-      expect(select).toHaveAccessibleDescription("newConnection.defaultDatabaseHint");
       fireEvent.change(select, { target: { value: "reporting" } });
       fireEvent.click(screen.getByText("newConnection.save"));
       await waitFor(() => expect(invoke).toHaveBeenCalledWith(

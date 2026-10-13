@@ -1,5 +1,6 @@
 import { useId } from "react";
 import { useTranslation } from "react-i18next";
+import { Select } from "../../ui/Select";
 
 interface DefaultDatabaseSelectProps {
   /** The saved format uses the first selected database as the default. */
@@ -15,23 +16,20 @@ export const DefaultDatabaseSelect = ({ databases, onChange }: DefaultDatabaseSe
       <label htmlFor={id} className="block text-xs font-medium text-secondary">
         {t("newConnection.defaultDatabase")}
       </label>
-      <select
+      <Select
         id={id}
-        value={databases[0] ?? ""}
-        onChange={(event) => {
-          const database = event.target.value;
+        ariaLabel={t("newConnection.defaultDatabase")}
+        value={databases[0] ?? null}
+        options={databases}
+        onChange={(database) => {
           if (databases.includes(database)) {
             onChange([database, ...databases.filter((db) => db !== database)]);
           }
         }}
-        aria-describedby={`${id}-hint`}
-        className="w-full px-2.5 py-1.5 bg-base border border-strong rounded-md text-sm text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-      >
-        {databases.map((database) => (
-          <option key={database} value={database}>{database}</option>
-        ))}
-      </select>
-      <p id={`${id}-hint`} className="text-xs text-muted">
+        searchPlaceholder={t("common.search")}
+        noResultsLabel={t("common.noResults")}
+      />
+      <p className="text-xs text-muted">
         {t("newConnection.defaultDatabaseHint")}
       </p>
     </div>
