@@ -338,11 +338,17 @@ const SqlEditorInternal = ({
           if (!model || !position) return;
           const offset = model.getOffsetAt(position);
           const statement = findStatementAtOffset(getStatements(model), offset);
-          // Run resolves gaps to a nearby statement. Selection leaves gaps alone.
-          if (!statement || offset < statement.range.start || offset > statement.range.end) return;
+          if (!statement || offset < statement.range.start) return;
           // The parser's range excludes the delimiter, matching Run.
           const start = model.getPositionAt(statement.range.start);
           const end = model.getPositionAt(statement.range.end);
+          if (offset > statement.range.end) {
+            // A caret after the delimiter or trailing spaces still belongs to
+            // this statement's line. Separate blank lines remain a no-op.
+            if (position.lineNumber !== end.lineNumber) return;
+            const gap = model.getValue().slice(statement.range.end, offset);
+            if (!/^[ \t]*;?[ \t]*$/.test(gap)) return;
+          }
           ed.setSelection({
             startLineNumber: start.lineNumber,
             startColumn: start.column,

@@ -250,6 +250,30 @@ describe('SqlEditorWrapper', () => {
       });
     });
 
+    it.each([
+      ['after a semicolon', 'SELECT 1;\nSELECT 2;', 9],
+      ['after trailing spaces', 'SELECT 1;  \nSELECT 2;', 11],
+      ['after a tab', 'SELECT 1;\t', 10],
+      ['at the end of the buffer', 'SELECT 1;', 9],
+      ['after an unterminated statement', 'SELECT 1  ', 10],
+      ['before a CRLF', 'SELECT 1;\r\nSELECT 2;', 9],
+    ])('selects the statement when the caret is %s on its own line', (_name, sql, offset) => {
+      const action = registerAction();
+      const ed = statementEditor(sql, offset);
+      action.run(ed);
+      expect(ed.setSelection).toHaveBeenCalledExactlyOnceWith({
+        startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 9,
+      });
+    });
+
+    it('does not select across a comment-only gap on the statement line', () => {
+      const sql = 'SELECT 1; -- comment';
+      const action = registerAction();
+      const ed = statementEditor(sql, sql.length);
+      action.run(ed);
+      expect(ed.setSelection).not.toHaveBeenCalled();
+    });
+
     it('refreshes the cached statements after a model edit', () => {
       const action = registerAction();
       const ed = statementEditor('SELECT 1;', 4);
