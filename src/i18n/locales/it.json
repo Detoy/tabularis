@@ -1463,6 +1463,7 @@
     "exportLoadedRowsWarning": "Sono state esportate solo {{loaded}} righe caricate su {{total}} righe totali. Scorri le pagine del risultato o esegui una query più mirata prima di esportare se ti servono più righe.",
     "queryParameters": "Parametri Query",
     "formatSql": "Formatta SQL",
+    "selectCurrentStatement": "Seleziona istruzione corrente",
     "convertSelectionToSqlList": "Converti selezione in lista SQL",
     "removeInvisibleCharacters": "Pulisci i caratteri incollati",
     "convertToConsole": "Converti in Console",

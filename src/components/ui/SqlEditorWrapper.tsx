@@ -96,8 +96,9 @@ const SqlEditorInternal = ({
   const lastSplitRef = useRef<{
     model: Monaco.editor.ITextModel | null;
     versionId: number;
+    dialect: Dialect | string | undefined;
     statements: Statement[];
-  }>({ model: null, versionId: -1, statements: [] });
+  }>({ model: null, versionId: -1, dialect: undefined, statements: [] });
   const editorTheme = useEditorTheme();
   const { settings } = useSettings();
   const { matchesShortcut } = useKeybindings();
@@ -307,6 +308,50 @@ const SqlEditorInternal = ({
       if (typeof document !== "undefined" && document.fonts) {
         document.fonts.ready.then(() => monaco.editor.remeasureFonts());
       }
+
+      const getStatements = (model: Monaco.editor.ITextModel): Statement[] => {
+        const versionId = model.getVersionId();
+        const currentDialect = dialectRef.current;
+        if (
+          lastSplitRef.current.model !== model ||
+          lastSplitRef.current.versionId !== versionId ||
+          lastSplitRef.current.dialect !== currentDialect
+        ) {
+          lastSplitRef.current = {
+            model,
+            versionId,
+            dialect: currentDialect,
+            statements: splitBatches(model.getValue(), currentDialect),
+          };
+        }
+        return lastSplitRef.current.statements;
+      };
+
+      editor.addAction({
+        id: 'tabularis.selectCurrentStatement',
+        label: t('editor.selectCurrentStatement'),
+        contextMenuGroupId: '1_modification',
+        contextMenuOrder: 1.4,
+        run: (ed) => {
+          const model = ed.getModel();
+          const position = ed.getPosition();
+          if (!model || !position) return;
+          const offset = model.getOffsetAt(position);
+          const statement = findStatementAtOffset(getStatements(model), offset);
+          // Run resolves gaps to a nearby statement. Selection leaves gaps alone.
+          if (!statement || offset < statement.range.start || offset > statement.range.end) return;
+          // The parser's range excludes the delimiter, matching Run.
+          const start = model.getPositionAt(statement.range.start);
+          const end = model.getPositionAt(statement.range.end);
+          ed.setSelection({
+            startLineNumber: start.lineNumber,
+            startColumn: start.column,
+            endLineNumber: end.lineNumber,
+            endColumn: end.column,
+          });
+          ed.focus();
+        },
+      });
 
       // Register custom Cut/Copy/Paste actions using the Tauri clipboard API.
       // Monaco's built-ins rely on document.execCommand, which silently fails
@@ -548,21 +593,6 @@ const SqlEditorInternal = ({
       // `dialect` prop so consumers that don't pass it are unaffected.
       if (dialectRef.current !== undefined) {
         const decorations = editor.createDecorationsCollection();
-
-        const getStatements = (model: Monaco.editor.ITextModel): Statement[] => {
-          const versionId = model.getVersionId();
-          if (
-            lastSplitRef.current.model !== model ||
-            lastSplitRef.current.versionId !== versionId
-          ) {
-            lastSplitRef.current = {
-              model,
-              versionId,
-              statements: splitBatches(model.getValue(), dialectRef.current),
-            };
-          }
-          return lastSplitRef.current.statements;
-        };
 
         // Only fires the callback when the answer actually changes — cursor
         // selection events arrive on every keystroke and arrow key.

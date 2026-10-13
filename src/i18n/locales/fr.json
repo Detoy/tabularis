@@ -1465,6 +1465,7 @@
     "exportLoadedRowsWarning": "Seules {{loaded}} lignes chargées sur {{total}} lignes au total ont été exportées. Parcourez les pages du résultat ou exécutez une requête plus restrictive avant d'exporter si vous avez besoin de plus de lignes.",
     "queryParameters": "Paramètres de requête",
     "formatSql": "Formater SQL",
+    "selectCurrentStatement": "Sélectionner l’instruction actuelle",
     "convertSelectionToSqlList": "Convertir la sélection en liste SQL",
     "removeInvisibleCharacters": "Nettoyer les caractères collés",
     "convertToConsole": "Convertir en console",

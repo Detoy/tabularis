@@ -1425,6 +1425,7 @@
     "exportLoadedRowsWarning": "Es wurden nur {{loaded}} geladene Zeilen von insgesamt {{total}} Zeilen exportiert. Blättere durch das Ergebnis oder führe eine eingeschränktere Abfrage aus, wenn du mehr Zeilen exportieren musst.",
     "queryParameters": "Abfrageparameter",
     "formatSql": "SQL formatieren",
+    "selectCurrentStatement": "Aktuelle Anweisung auswählen",
     "convertSelectionToSqlList": "Auswahl in SQL-Liste umwandeln",
     "removeInvisibleCharacters": "Eingefügte Zeichen bereinigen",
     "convertToConsole": "In Konsole umwandeln",

@@ -1436,6 +1436,7 @@
     "exportLoadedRowsWarning": "合計 {{total}} 行のうち、読み込み済みの {{loaded}} 行のみをエクスポートしました。さらに多くの行が必要な場合は、結果をページ送りするか、より絞り込んだクエリを実行してからエクスポートしてください。",
     "queryParameters": "クエリパラメータ",
     "formatSql": "SQLをフォーマット",
+    "selectCurrentStatement": "現在のステートメントを選択",
     "convertSelectionToSqlList": "選択範囲をSQLリストに変換",
     "removeInvisibleCharacters": "貼り付けた文字をクリーンアップ",
     "convertToConsole": "コンソールに変換",

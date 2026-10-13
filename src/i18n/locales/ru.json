@@ -1427,6 +1427,7 @@
     "exportLoadedRowsWarning": "Экспортированы только {{loaded}} загруженных строк из {{total}} строк. Если нужны дополнительные строки, пролистайте результат или выполните более узкий запрос перед экспортом.",
     "queryParameters": "Параметры запроса",
     "formatSql": "Форматировать SQL",
+    "selectCurrentStatement": "Выбрать текущий оператор",
     "convertSelectionToSqlList": "Преобразовать выделение в список SQL",
     "removeInvisibleCharacters": "Очистить вставленные символы",
     "convertToConsole": "Преобразовать в консоль",

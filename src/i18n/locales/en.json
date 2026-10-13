@@ -1473,6 +1473,7 @@
     "exportLoadedRowsWarning": "Only {{loaded}} loaded rows were exported out of {{total}} total rows. Page through the result or run a narrower query before exporting if you need more rows.",
     "queryParameters": "Query Parameters",
     "formatSql": "Format SQL",
+    "selectCurrentStatement": "Select current statement",
     "convertSelectionToSqlList": "Convert Selection to SQL List",
     "removeInvisibleCharacters": "Clean up pasted characters",
     "convertToConsole": "Convert to Console",

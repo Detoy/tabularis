@@ -167,6 +167,166 @@ describe('SqlEditorWrapper', () => {
     return { addAction, addCommand, keyDownHandlers, trigger };
   };
 
+  describe('Select current statement', () => {
+    const registerAction = (dialect = 'postgres') => {
+      render(
+        <SqlEditorWrapper initialValue="" onChange={mockOnChange} onRun={mockOnRun} dialect={dialect} />,
+        { wrapper },
+      );
+      const { addAction } = mountCapturedEditor();
+      const action = addAction.mock.calls
+        .map(([descriptor]) => descriptor as {
+          id: string;
+          label: string;
+          contextMenuGroupId: string;
+          run: (ed: unknown) => void;
+        })
+        .find((descriptor) => descriptor.id === 'tabularis.selectCurrentStatement');
+      expect(action).toMatchObject({
+        label: 'editor.selectCurrentStatement',
+        contextMenuGroupId: '1_modification',
+      });
+      if (!action) throw new Error('statement selection action was not registered');
+      return action;
+    };
+
+    const statementEditor = (sql: string, offset: number) => {
+      const getPositionAt = (at: number) => {
+        const lines = model.getValue().slice(0, at).split('\n');
+        return { lineNumber: lines.length, column: lines[lines.length - 1].length + 1 };
+      };
+      const model = {
+        getValue: vi.fn(() => sql),
+        getVersionId: vi.fn(() => 1),
+        getOffsetAt: () => offset,
+        getPositionAt,
+      };
+      return {
+        model,
+        getModel: vi.fn(() => model),
+        getPosition: vi.fn(() => getPositionAt(offset)),
+        setSelection: vi.fn(),
+        focus: vi.fn(),
+      };
+    };
+
+    it.each([true, false])('selects the parsed statement with cursor execution set to %s', (runStatementUnderCursor) => {
+      settingsValue.settings = { ...DEFAULT_SETTINGS, runStatementUnderCursor };
+      const action = registerAction();
+      const sql = "SELECT 1;\n\n  SELECT 'a;b',\n    '😀' AS value;\nSELECT 3;";
+      const ed = statementEditor(sql, sql.indexOf('😀'));
+
+      action.run(ed);
+
+      expect(ed.setSelection).toHaveBeenCalledExactlyOnceWith({
+        startLineNumber: 3, startColumn: 3,
+        endLineNumber: 4, endColumn: 18,
+      });
+      expect(ed.focus).toHaveBeenCalledOnce();
+      expect(mockOnRun).not.toHaveBeenCalled();
+      expect(mockOnChange).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['leading blank line', '\nSELECT 1;', 0],
+      ['blank line between statements', 'SELECT 1;\n\nSELECT 2;', 10],
+      ['trailing blank line', 'SELECT 1;\n\n', 10],
+      ['comment-only buffer', '-- no query\n', 5],
+      ['empty buffer', '', 0],
+    ])('leaves the selection alone on a %s', (_name, sql, offset) => {
+      const action = registerAction();
+      const ed = statementEditor(sql, offset);
+      action.run(ed);
+      expect(ed.setSelection).not.toHaveBeenCalled();
+      expect(ed.focus).not.toHaveBeenCalled();
+    });
+
+    it.each([0, 4, 8])('selects from the first character to the delimiter at cursor offset %s', (offset) => {
+      const action = registerAction();
+      const ed = statementEditor('SELECT 1;', offset);
+      action.run(ed);
+      expect(ed.setSelection).toHaveBeenCalledExactlyOnceWith({
+        startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 9,
+      });
+    });
+
+    it('refreshes the cached statements after a model edit', () => {
+      const action = registerAction();
+      const ed = statementEditor('SELECT 1;', 4);
+      action.run(ed);
+      ed.model.getValue.mockReturnValue('SELECT 123;');
+      ed.model.getVersionId.mockReturnValue(2);
+      action.run(ed);
+      expect(ed.setSelection).toHaveBeenLastCalledWith({
+        startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 11,
+      });
+    });
+
+    it('uses the active dialect for semicolons inside PostgreSQL dollar quotes', () => {
+      const action = registerAction();
+      const sql = 'SELECT $$first; second$$; SELECT 2;';
+      const ed = statementEditor(sql, sql.indexOf('second'));
+      action.run(ed);
+      expect(ed.setSelection).toHaveBeenCalledExactlyOnceWith({
+        startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 25,
+      });
+    });
+
+    it('selects an unterminated statement at the end of the buffer without a dialect prop', () => {
+      render(<SqlEditorWrapper initialValue="" onChange={mockOnChange} onRun={mockOnRun} />, { wrapper });
+      const { addAction } = mountCapturedEditor();
+      const action = addAction.mock.calls
+        .map(([descriptor]) => descriptor as { id: string; run: (ed: unknown) => void })
+        .find((descriptor) => descriptor.id === 'tabularis.selectCurrentStatement');
+      const ed = statementEditor('SELECT 1', 8);
+      expect(action).toBeDefined();
+      action?.run(ed);
+      expect(ed.setSelection).toHaveBeenCalledExactlyOnceWith({
+        startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 9,
+      });
+    });
+
+    it('invalidates the shared cache when the dialect changes without a model edit', () => {
+      const { rerender } = render(
+        <SqlEditorWrapper initialValue="" onChange={mockOnChange} onRun={mockOnRun} dialect="postgres" />,
+        { wrapper },
+      );
+      const { addAction } = mountCapturedEditor();
+      const action = addAction.mock.calls
+        .map(([descriptor]) => descriptor as { id: string; run: (ed: unknown) => void })
+        .find((descriptor) => descriptor.id === 'tabularis.selectCurrentStatement');
+      expect(action).toBeDefined();
+      const ed = statementEditor('SELECT 1; SELECT 2;', 12);
+      action?.run(ed);
+      expect(ed.setSelection).toHaveBeenLastCalledWith({
+        startLineNumber: 1, startColumn: 11, endLineNumber: 1, endColumn: 19,
+      });
+      rerender(<SqlEditorWrapper initialValue="" onChange={mockOnChange} onRun={mockOnRun} dialect="mssql" />);
+      action?.run(ed);
+      expect(ed.setSelection).toHaveBeenLastCalledWith({
+        startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 20,
+      });
+    });
+
+    it('invalidates the shared cache when a model is replaced at the same version', () => {
+      const action = registerAction();
+      action.run(statementEditor('SELECT 1;', 4));
+      const ed = statementEditor('SELECT 123;', 4);
+      action.run(ed);
+      expect(ed.setSelection).toHaveBeenCalledExactlyOnceWith({
+        startLineNumber: 1, startColumn: 1, endLineNumber: 1, endColumn: 11,
+      });
+    });
+
+    it('does nothing when the model or cursor is unavailable', () => {
+      const action = registerAction();
+      const setSelection = vi.fn();
+      action.run({ getModel: () => null, getPosition: () => null, setSelection });
+      action.run({ getModel: () => ({}), getPosition: () => null, setSelection });
+      expect(setSelection).not.toHaveBeenCalled();
+    });
+  });
+
   it('highlights hidden Unicode by default and honors the saved editor setting', () => {
     const { unmount } = render(
       <SqlEditorWrapper initialValue="" onChange={mockOnChange} onRun={mockOnRun} />,

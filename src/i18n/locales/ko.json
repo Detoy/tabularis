@@ -1400,6 +1400,7 @@
     "exportLoadedRowsWarning": "총 {{total}}개 행 중 로드된 {{loaded}}개 행만 내보냈습니다. 더 많은 행이 필요하면 결과 페이지를 넘기거나 더 좁은 쿼리를 실행한 뒤 내보내세요.",
     "queryParameters": "쿼리 매개변수",
     "formatSql": "SQL 포맷",
+    "selectCurrentStatement": "현재 문 선택",
     "convertSelectionToSqlList": "선택 영역을 SQL 목록으로 변환",
     "removeInvisibleCharacters": "붙여넣은 문자 정리",
     "convertToConsole": "콘솔로 변환",
