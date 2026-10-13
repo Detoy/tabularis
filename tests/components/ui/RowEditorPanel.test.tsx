@@ -10,7 +10,7 @@ const row = { id: 7 };
 const props = {
   onClose: vi.fn(), rowData: row, rowIndex: 0, isInsertion: false,
   columns: [{ name: 'id', type: 'integer' }], onChange: vi.fn(),
-  connectionId: 'pg-pane', tableName: 'users', schema: 'tenant',
+  connectionId: 'pg-pane', tableName: 'users', schema: 'tenant', database: 'shop',
 };
 const slots = ['row-editor-sidebar.header.actions', 'row-editor-sidebar.field.after'] as const;
 
@@ -32,7 +32,7 @@ describe('RowEditorPanel plugin context', () => {
     for (const probe of probes) {
       expect(JSON.parse(probe.textContent ?? '{}')).toMatchObject({
         driver: 'postgres', connectionId: 'pg-pane', schema: 'tenant',
-        tableName: 'users', rowData: row, rowIndex: 0, isInsertion: false,
+        tableName: 'users', database: 'shop', rowData: row, rowIndex: 0, isInsertion: false,
       });
     }
     expect(screen.queryByTestId('mysql-slot')).not.toBeInTheDocument();
