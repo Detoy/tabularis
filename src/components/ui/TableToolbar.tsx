@@ -27,6 +27,7 @@ import type { StructuredFilter, FilterCombinator, DistinctValue } from "../../ut
 import { formatSqlIdentifier } from "../../utils/identifiers";
 import { formatSortClause } from "../../utils/tableToolbar";
 import { FilterRow } from "./FilterRow";
+import { StyledSelect } from "./StyledSelect";
 import { SlotAnchor } from "./SlotAnchor";
 import { useDatabase } from "../../hooks/useDatabase";
 
@@ -621,26 +622,21 @@ const TableToolbarInternal = ({
               }`}>
               <RefreshCw size={14} />
             </button>
-            <label className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1.5">
               <span className={`hidden @[800px]:inline ${autoRefreshActive ? "text-accent" : ""}`}>
                 {t("toolbar.autoRefresh.label")}
               </span>
-              <select aria-label={t("toolbar.autoRefresh.label")}
-                value={autoRefreshIntervalMs}
-                onChange={(event) => onAutoRefreshChange(normalizeAutoRefreshInterval(Number(event.target.value)))}
-                data-active={autoRefreshActive || undefined}
-                className={`bg-base border rounded px-1 py-1 transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus ${
-                  autoRefreshActive
-                    ? "border-accent-primary/50 text-accent font-medium"
-                    : "border-default text-secondary"
-                }`}>
-                {AUTO_REFRESH_INTERVALS.map((interval) => (
-                  <option key={interval} value={interval}>
-                    {interval ? t("toolbar.autoRefresh.seconds", { seconds: interval / 1000 }) : t("toolbar.autoRefresh.off")}
-                  </option>
-                ))}
-              </select>
-            </label>
+              <StyledSelect
+                ariaLabel={t("toolbar.autoRefresh.label")}
+                value={String(autoRefreshIntervalMs)}
+                onChange={(value) => onAutoRefreshChange(normalizeAutoRefreshInterval(Number(value)))}
+                options={AUTO_REFRESH_INTERVALS.map(String)}
+                getOptionLabel={(value) => Number(value)
+                  ? t("toolbar.autoRefresh.seconds", { seconds: Number(value) / 1000 })
+                  : t("toolbar.autoRefresh.off")}
+                active={autoRefreshActive}
+              />
+            </div>
             {/* Always mounted so screen readers announce text changes reliably. */}
             <span role="status" className="text-muted">
               {autoRefreshPaused
