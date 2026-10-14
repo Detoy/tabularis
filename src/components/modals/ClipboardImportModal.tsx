@@ -411,7 +411,7 @@ export function ClipboardImportModal({ isOpen, onClose, onSuccess, schema }: Cli
       >
         <div className="relative flex items-start justify-between gap-4 px-5 py-4 border-b border-default bg-gradient-to-br from-accent-primary/10 via-base to-base">
           <div className="flex min-w-0 flex-1 gap-3">
-            <div className="bg-accent-primary/15 p-2.5 rounded-lg ring-1 ring-accent-primary/20 shadow-inner shrink-0">
+            <div className="self-start bg-accent-primary/15 p-2.5 rounded-lg ring-1 ring-accent-primary/20 shadow-inner shrink-0">
               <Clipboard className="text-accent" size={20} />
             </div>
             <div className="flex min-w-0 flex-1 flex-col gap-2">
