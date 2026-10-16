@@ -69,6 +69,7 @@ import {
   parsePasteMatrix,
   stripHeaderRow,
   computePasteTargets,
+  isOriginalCellValue,
   type PasteTarget,
   type ColumnDisplayInfo,
   type MergedRow,
@@ -2221,8 +2222,10 @@ export const DataGrid = React.memo(
             const pkMapVal = buildPkMap(pkColumns!, mergedRow.rowData, pkIndexMaps);
             // Same convention as handleEditCommit: writing the original value
             // back clears any pending change instead of staging a no-op.
-            const isUnchanged =
-              String(value) === String(mergedRow.rowData[colIndex]);
+            const isUnchanged = isOriginalCellValue(
+              value,
+              mergedRow.rowData[colIndex],
+            );
             onPendingChange!(pkMapVal, colName, isUnchanged ? undefined : value);
             applied++;
           }

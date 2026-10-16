@@ -592,6 +592,22 @@ function escapeRegExp(string: string): string {
   return string.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+/**
+ * Whether writing `value` puts a cell back to its stored `original`, so the
+ * pending change can be cleared instead of staging a no-op. Text matches by
+ * its text, as a paste always has: "5" over 5, and "null" (how a copied NULL
+ * reads) over NULL. A NULL or structured value written by "Edit selection"
+ * only matches itself, so Set NULL over the text "null" and a JSON value
+ * filled over another one are staged.
+ */
+export function isOriginalCellValue(value: unknown, original: unknown): boolean {
+  const isStructured = (v: unknown) => typeof v === "object" && v !== null;
+  if (value === null || isStructured(value) || isStructured(original)) {
+    return Object.is(value, original) || (value === null && original === undefined);
+  }
+  return String(value) === String(original);
+}
+
 /** One cell write produced by a paste operation */
 export interface PasteTarget {
   rowIndex: number;

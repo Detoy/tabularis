@@ -2442,6 +2442,35 @@ describe("DataGrid Edit selection context menu (#1000)", () => {
     expect(screen.queryByLabelText("dataGrid.setToValueLabel")).toBeNull();
   });
 
+  it("stages NULL over the text \"null\" and JSON values copied by fill down", async () => {
+    const { container, onPendingChange } = renderGrid({
+      columns: ["id", "name", "city", "settings"],
+      columnMetadata: [
+        ...metadata,
+        { name: "settings", data_type: "jsonb", is_pk: false, is_nullable: true, is_auto_increment: false },
+      ],
+      data: [
+        [1, "a", "null", { theme: "dark" }],
+        [2, "b", "Oslo", { theme: "light" }],
+      ],
+    });
+
+    fireEvent.contextMenu(cellAt(container, 0, 2));
+    await openEditSelection();
+    // The single-cell Set NULL is in the main menu too; the submenu's comes last.
+    fireEvent.click((await screen.findAllByText("dataGrid.setNull")).at(-1)!);
+    expect(onPendingChange.mock.calls).toEqual([[{ id: 1 }, "city", null]]);
+
+    onPendingChange.mockClear();
+    selectColumn(3);
+    fireEvent.contextMenu(cellAt(container, 1, 3));
+    await openEditSelection();
+    fireEvent.click(await screen.findByText("dataGrid.fillDown"));
+    expect(onPendingChange.mock.calls).toEqual([
+      [{ id: 2 }, "settings", { theme: "dark" }],
+    ]);
+  });
+
   it.each([
     ["a read-only grid", { readonly: true }, "dataGrid.editSelectionReadOnly"],
     ["a result without a source table", { tableName: null }, "dataGrid.editSelectionNoTable"],

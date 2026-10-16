@@ -24,6 +24,7 @@ import {
   getColumnLayoutKey,
   resolveLockedColumnWidths,
   isUuidColumnType,
+  isOriginalCellValue,
 } from '../../src/utils/dataGrid';
 
 describe('createDataGridResultCommands', () => {
@@ -1229,3 +1230,31 @@ describe('resolveLockedColumnWidths', () => {
     ).toBeNull();
   });
 });
+
+describe('isOriginalCellValue', () => {
+  it('matches pasted text against the stored value by its text', () => {
+    expect(isOriginalCellValue('5', 5)).toBe(true);
+    expect(isOriginalCellValue('true', true)).toBe(true);
+    expect(isOriginalCellValue('Rome', 'Rome')).toBe(true);
+    expect(isOriginalCellValue('Rome ', 'Rome')).toBe(false);
+  });
+
+  it('matches a written NULL only with NULL', () => {
+    expect(isOriginalCellValue(null, 'null')).toBe(false);
+    expect(isOriginalCellValue(null, '')).toBe(false);
+    expect(isOriginalCellValue(null, null)).toBe(true);
+    expect(isOriginalCellValue(null, undefined)).toBe(true);
+  });
+
+  it('still matches pasted "null" text over NULL, as a copied NULL reads', () => {
+    expect(isOriginalCellValue('null', null)).toBe(true);
+  });
+
+  it('matches structured values only when they are the same value', () => {
+    const settings = { theme: 'dark' };
+    expect(isOriginalCellValue(settings, settings)).toBe(true);
+    expect(isOriginalCellValue({ theme: 'light' }, settings)).toBe(false);
+    expect(isOriginalCellValue('[object Object]', settings)).toBe(false);
+  });
+});
+
