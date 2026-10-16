@@ -49,6 +49,7 @@ import {
   CaseUpper,
   CaseLower,
   CaseSensitive,
+  Table,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -83,7 +84,8 @@ import {
   createDataGridResultCommands,
   type RangeExtendKey,
 } from "../../utils/dataGrid";
-import { readText } from "@tauri-apps/plugin-clipboard-manager";
+import { isTypingTarget } from "../../utils/keyboardEvents";
+import { readText, writeHtml } from "@tauri-apps/plugin-clipboard-manager";
 import { getSortButtonAction } from "../../utils/tableToolbar";
 import { useSettings } from "../../hooks/useSettings";
 import { useJsonEditorActivity } from "../../hooks/useJsonEditorActivity";
@@ -126,6 +128,7 @@ import {
   getSelectedRows,
   projectColumns,
   copyTextToClipboard,
+  rowsToHtmlTable,
   columnNamesAsLines,
   columnNamesAsJson,
 } from "../../utils/clipboard";
@@ -1908,10 +1911,11 @@ export const DataGrid = React.memo(
       showAlert,
     ]);
 
-    const copyToClipboard = useCallback(
-      async (text: string, toastMessage?: string) => {
+    // Runs a clipboard write, then shows the success toast or the error alert.
+    const writeToClipboard = useCallback(
+      async (write: () => Promise<void>, toastMessage?: string) => {
         try {
-          await copyTextToClipboard(text);
+          await write();
           if (toastMessage) {
             showToast(toastMessage, { kind: "success" });
           }
@@ -1926,6 +1930,12 @@ export const DataGrid = React.memo(
       [t, showAlert, showToast],
     );
 
+    const copyToClipboard = useCallback(
+      (text: string, toastMessage?: string) =>
+        writeToClipboard(() => copyTextToClipboard(text), toastMessage),
+      [writeToClipboard],
+    );
+
     const formatRows = useCallback(
       (rows: unknown[][], withHeaders = false) =>
         formatRowsForCopy(rows, columns, copyFormat ?? "csv", {
@@ -1937,27 +1947,42 @@ export const DataGrid = React.memo(
       [columns, copyFormat, csvDelimiter, csvIncludeHeaders, tableName],
     );
 
-    const copySelectedOrContextRow = useCallback(async () => {
-      if (!contextMenu) return;
+    // Rows the row context menu acts on: the selected rows (pending insertions
+    // included), or just the right-clicked row when nothing is selected.
+    const getContextRows = useCallback((): unknown[][] | null => {
+      if (!contextMenu) return null;
+      if (selectedRowIndices.size === 0) return [contextMenu.row];
+      return getSelectedRows(
+        mergedRows.map((row) => row.rowData),
+        selectedRowIndices,
+      );
+    }, [contextMenu, selectedRowIndices, mergedRows]);
 
-      const rowsWithInsertions = mergedRows.map((row) => row.rowData);
-      const rows =
-        selectedRowIndices.size > 0
-          ? getSelectedRows(rowsWithInsertions, selectedRowIndices)
-          : [contextMenu.row];
+    const copySelectedOrContextRow = useCallback(async () => {
+      const rows = getContextRows();
+      if (!rows) return;
 
       await copyToClipboard(
         formatRows(rows, true),
         rowsCopiedToast(rows.length),
       );
-    }, [
-      contextMenu,
-      selectedRowIndices,
-      mergedRows,
-      formatRows,
-      copyToClipboard,
-      rowsCopiedToast,
-    ]);
+    }, [getContextRows, formatRows, copyToClipboard, rowsCopiedToast]);
+
+    // Copies the selected rows (or the right-clicked row) as an HTML table, with
+    // the regular copy output as the plain-text flavor.
+    const copySelectedOrContextRowAsHtml = useCallback(async () => {
+      const rows = getContextRows();
+      if (!rows) return;
+
+      await writeToClipboard(
+        () =>
+          writeHtml(
+            rowsToHtmlTable(rows, columns, "null"),
+            formatRows(rows, true),
+          ),
+        rowsCopiedToast(rows.length),
+      );
+    }, [getContextRows, columns, formatRows, writeToClipboard, rowsCopiedToast]);
 
     const copyHeaderName = useCallback(async () => {
       if (!headerContextMenu) return;
@@ -2446,8 +2471,8 @@ export const DataGrid = React.memo(
         // sortable column headers) — Enter must still activate those.
         const target = e.target as HTMLElement;
         if (
-          target.isContentEditable ||
-          target.closest("input, textarea, select, button, [role='button']")
+          isTypingTarget(target) ||
+          Boolean(target.closest?.("button, [role='button']"))
         ) {
           return;
         }
@@ -2706,11 +2731,7 @@ export const DataGrid = React.memo(
     useEffect(() => {
       const handleKeyDown = (e: KeyboardEvent) => {
         const keyTarget = e.target as HTMLElement | null;
-        const isEditableTarget =
-          keyTarget instanceof HTMLInputElement ||
-          keyTarget instanceof HTMLTextAreaElement ||
-          keyTarget instanceof HTMLSelectElement ||
-          keyTarget?.isContentEditable === true;
+        const isEditableTarget = isTypingTarget(keyTarget);
 
         // CMD/CTRL + C
         if ((e.metaKey || e.ctrlKey) && e.key === "c") {
@@ -3317,6 +3338,12 @@ export const DataGrid = React.memo(
                 }),
                 icon: Copy,
                 action: copySelectedOrContextRow,
+              });
+
+              menuItems.push({
+                label: t("dataGrid.copyAsHtmlTable"),
+                icon: Table,
+                action: copySelectedOrContextRowAsHtml,
               });
 
               // Direct one-click path to copy the entire result set when the
