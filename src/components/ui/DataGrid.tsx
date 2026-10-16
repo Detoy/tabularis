@@ -42,6 +42,13 @@ import {
   EyeOff,
   Hash,
   ListChecks,
+  PencilLine,
+  ArrowDownToLine,
+  TextCursorInput,
+  Scissors,
+  CaseUpper,
+  CaseLower,
+  CaseSensitive,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -88,6 +95,13 @@ import {
 } from "../../utils/json";
 import { supportsEmptyString } from "../../utils/text";
 import {
+  planBulkEdit,
+  resolveEditSelection,
+  type BulkEdit,
+  type CellWrite,
+  type EditSelection,
+} from "../../utils/bulkCellEdit";
+import {
   pickPrimaryForeignKeyByColumn,
   getForeignKeyForPreview,
 } from "../../utils/foreignKeys";
@@ -126,6 +140,7 @@ import type {
 import type { ResultCommands } from "../../types/commands";
 import { MemoRow, type RowCtx } from "./DataGridRow";
 import { JumpToColumnModal } from "../modals/JumpToColumnModal";
+import { SetCellsValueModal } from "../modals/SetCellsValueModal";
 import { KeybindingsContext } from "../../contexts/KeybindingsContext";
 
 export interface DataGridCommandTarget {
@@ -442,6 +457,9 @@ export const DataGrid = React.memo(
       colIndex: number;
     } | null>(null);
     const [jumpToColumnOpen, setJumpToColumnOpen] = useState(false);
+    // The selection "Edit selection → Set to value…" is asking a value for.
+    const [valuePromptSelection, setValuePromptSelection] =
+      useState<EditSelection | null>(null);
     const editInputRef = useRef<HTMLInputElement>(null);
     const focusTriggerRef = useRef(0);
     // Mirror of editingCell so the commit/keydown callbacks can read the latest
@@ -2168,6 +2186,62 @@ export const DataGrid = React.memo(
       setContextMenu(null);
     }, [contextMenu, copyCellValue]);
 
+    // Stages cell writes from a paste or an "Edit selection" action and
+    // returns how many were staged. Existing rows can only be staged when the
+    // grid can identify them: without a usable key (raw query results,
+    // keyless tables) only pending-insertion rows take a value.
+    const stageCellWrites = useCallback(
+      (writes: CellWrite[]): number => {
+        const canEditExisting =
+          !!onPendingChange && !!pkColumns && pkIndexMaps.length > 0;
+        let applied = 0;
+        for (const { rowIndex, colIndex, value } of writes) {
+          const mergedRow = mergedRows[rowIndex];
+          if (!mergedRow) continue;
+          const colName = columns[colIndex];
+          // Same guard as inline editing: generated columns are computed by
+          // the database and never accept a value, and masked cells must be
+          // revealed before they take one.
+          if (generatedColumns?.has(colName.toLowerCase())) continue;
+          if (isCellMasked(rowIndex, colIndex)) continue;
+          if (mergedRow.type === "insertion") {
+            if (onPendingInsertionChange && mergedRow.tempId) {
+              onPendingInsertionChange(mergedRow.tempId, colName, value);
+              applied++;
+            }
+          } else if (canEditExisting) {
+            // Same guard as inline editing: aliases and computed result
+            // columns are not physical columns and must not be staged.
+            if (
+              physicalColumnSet &&
+              !physicalColumnSet.has(colName.toLowerCase())
+            ) {
+              continue;
+            }
+            const pkMapVal = buildPkMap(pkColumns!, mergedRow.rowData, pkIndexMaps);
+            // Same convention as handleEditCommit: writing the original value
+            // back clears any pending change instead of staging a no-op.
+            const isUnchanged =
+              String(value) === String(mergedRow.rowData[colIndex]);
+            onPendingChange!(pkMapVal, colName, isUnchanged ? undefined : value);
+            applied++;
+          }
+        }
+        return applied;
+      },
+      [
+        mergedRows,
+        columns,
+        physicalColumnSet,
+        generatedColumns,
+        isCellMasked,
+        onPendingChange,
+        onPendingInsertionChange,
+        pkColumns,
+        pkIndexMaps,
+      ],
+    );
+
     // Pastes clipboard text into the grid as staged edits. The paste target,
     // in priority order: the cell range's top-left, the given cell (context
     // menu), the top of the row selection, or the focused cell. A single
@@ -2232,44 +2306,7 @@ export const DataGrid = React.memo(
         }
         if (targets.length === 0) return;
 
-        // Existing rows can only be staged when the grid can identify them —
-        // without a usable key (raw query results, keyless tables) only
-        // pending-insertion rows accept a paste.
-        const canEditExisting =
-          !!onPendingChange && !!pkColumns && pkIndexMaps.length > 0;
-        let applied = 0;
-        for (const { rowIndex, colIndex, value } of targets) {
-          const mergedRow = mergedRows[rowIndex];
-          if (!mergedRow) continue;
-          const colName = columns[colIndex];
-          // Same guard as inline editing: generated columns are computed by
-          // the database and never accept a value, and masked cells must be
-          // revealed before they take one.
-          if (generatedColumns?.has(colName.toLowerCase())) continue;
-          if (isCellMasked(rowIndex, colIndex)) continue;
-          if (mergedRow.type === "insertion") {
-            if (onPendingInsertionChange && mergedRow.tempId) {
-              onPendingInsertionChange(mergedRow.tempId, colName, value);
-              applied++;
-            }
-          } else if (canEditExisting) {
-            // Same guard as inline editing: aliases and computed result
-            // columns are not physical columns and must not be staged.
-            if (
-              physicalColumnSet &&
-              !physicalColumnSet.has(colName.toLowerCase())
-            ) {
-              continue;
-            }
-            const pkMapVal = buildPkMap(pkColumns!, mergedRow.rowData, pkIndexMaps);
-            // Same convention as handleEditCommit: pasting the original value
-            // back clears any pending change instead of staging a no-op.
-            const isUnchanged =
-              String(value) === String(mergedRow.rowData[colIndex]);
-            onPendingChange!(pkMapVal, colName, isUnchanged ? undefined : value);
-            applied++;
-          }
-        }
+        const applied = stageCellWrites(targets);
         if (applied > 0) {
           showToast(t("dataGrid.pastedCells", { count: applied }), {
             kind: "success",
@@ -2285,18 +2322,51 @@ export const DataGrid = React.memo(
         selectedRowIndices,
         mergedRows,
         columns,
-        physicalColumnSet,
-        generatedColumns,
         pkColumnSet,
-        isCellMasked,
         csvDelimiter,
-        onPendingChange,
-        onPendingInsertionChange,
-        pkColumns,
-        pkIndexMaps,
+        stageCellWrites,
         showToast,
         t,
       ],
+    );
+
+    // Applies an "Edit selection" action: plans the writes against the values
+    // the grid shows (pending edits included) and stages them like a paste.
+    const applyBulkEdit = useCallback(
+      (edit: BulkEdit, selection: EditSelection) => {
+        const rowValues = new Map<number, Record<string, unknown>>();
+        const valueAt = (rowIndex: number, colIndex: number) => {
+          let row = rowValues.get(rowIndex);
+          if (!row) {
+            const mergedRow = mergedRows[rowIndex];
+            row = mergedRow
+              ? buildRowDataWithPending(
+                  mergedRow.rowData,
+                  mergedRow.type === "insertion",
+                )
+              : {};
+            rowValues.set(rowIndex, row);
+          }
+          return row[columns[colIndex]];
+        };
+        const writes = planBulkEdit(edit, selection, valueAt);
+        const applied = writes.length > 0 ? stageCellWrites(writes) : 0;
+        if (applied > 0) {
+          showToast(t("dataGrid.editedCells", { count: applied }), {
+            kind: "success",
+          });
+        } else {
+          showToast(
+            t(
+              writes.length > 0
+                ? "dataGrid.pasteNotEditable"
+                : "dataGrid.editSelectionNoChange",
+            ),
+            { kind: "info" },
+          );
+        }
+      },
+      [mergedRows, columns, buildRowDataWithPending, stageCellWrites, showToast, t],
     );
 
     // Track the last-interacted grid so document-level shortcuts don't fire in
@@ -2830,6 +2900,20 @@ export const DataGrid = React.memo(
             onClose={closeJumpToColumn}
           />
         )}
+        {valuePromptSelection && (
+          <SetCellsValueModal
+            isOpen
+            cellCount={
+              valuePromptSelection.rows.length *
+              valuePromptSelection.cols.length
+            }
+            onApply={(value) => {
+              applyBulkEdit({ kind: "setValue", value }, valuePromptSelection);
+              setValuePromptSelection(null);
+            }}
+            onClose={() => setValuePromptSelection(null)}
+          />
+        )}
         {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions -- focus host for the spreadsheet keyboard model (arrows, ranges, copy); a full ARIA grid needs per-cell roles and activedescendant */}
         <div
           ref={parentRef}
@@ -3278,6 +3362,116 @@ export const DataGrid = React.memo(
                       colIndex: contextMenu.colIndex,
                     });
                   },
+                });
+              }
+
+              // "Edit selection": bulk edits over the range, selected columns
+              // or selected rows the right-clicked cell belongs to. Shown
+              // disabled, with the reason, where the grid cannot stage edits.
+              const editSelection = resolveEditSelection(
+                { rowIndex: contextMenu.rowIndex, colIndex: contextMenu.colIndex },
+                {
+                  cellRange,
+                  selectedColIndices,
+                  selectedRowIndices,
+                  rowCount: mergedRows.length,
+                  columnCount: columns.length,
+                  excludedRowSelectionCols: new Set(
+                    columns.flatMap((col, idx) =>
+                      pkColumnSet.has(col.toLowerCase()) ? [idx] : [],
+                    ),
+                  ),
+                },
+              );
+              const canStageExistingRows =
+                !!onPendingChange && !!pkColumns && pkIndexMaps.length > 0;
+              const editSelectionBlocker = !tableName
+                ? "dataGrid.editSelectionNoTable"
+                : readonlyProp
+                  ? "dataGrid.editSelectionReadOnly"
+                  : !canStageExistingRows &&
+                      editSelection.rows.every(
+                        (rowIndex) => mergedRows[rowIndex]?.type !== "insertion",
+                      )
+                    ? "dataGrid.editSelectionNoKey"
+                    : null;
+              if (editSelectionBlocker) {
+                menuItems.push({
+                  label: t("dataGrid.editSelectionUnavailable", {
+                    reason: t(editSelectionBlocker),
+                  }),
+                  icon: PencilLine,
+                  disabled: true,
+                });
+              } else {
+                const runBulkEdit =
+                  (edit: BulkEdit, selection: EditSelection = editSelection) =>
+                  () => {
+                    applyBulkEdit(edit, selection);
+                    setContextMenu(null);
+                  };
+                const nullableCols = editSelection.cols.filter((colIndex) =>
+                  nullableColumns?.includes(columns[colIndex]),
+                );
+                menuItems.push({
+                  label: t("dataGrid.editSelection"),
+                  icon: PencilLine,
+                  submenu: [
+                    {
+                      label: t("dataGrid.editSelectionCells", {
+                        count:
+                          editSelection.rows.length * editSelection.cols.length,
+                      }),
+                      header: true,
+                    },
+                    {
+                      label: t("dataGrid.fillDown"),
+                      icon: ArrowDownToLine,
+                      disabled: editSelection.rows.length < 2,
+                      action: runBulkEdit({ kind: "fillDown" }),
+                    },
+                    {
+                      label: t("dataGrid.setToValue"),
+                      icon: TextCursorInput,
+                      action: () => {
+                        setValuePromptSelection(editSelection);
+                        setContextMenu(null);
+                      },
+                    },
+                    ...(nullableCols.length > 0
+                      ? [
+                          {
+                            label: t("dataGrid.setNull"),
+                            icon: Ban,
+                            action: runBulkEdit(
+                              { kind: "setValue", value: null },
+                              { rows: editSelection.rows, cols: nullableCols },
+                            ),
+                          },
+                        ]
+                      : []),
+                    { separator: true },
+                    {
+                      label: t("dataGrid.trimWhitespace"),
+                      icon: Scissors,
+                      action: runBulkEdit({ kind: "trim" }),
+                    },
+                    {
+                      label: t("dataGrid.upperCase"),
+                      icon: CaseUpper,
+                      action: runBulkEdit({ kind: "changeCase", mode: "upper" }),
+                    },
+                    {
+                      label: t("dataGrid.lowerCase"),
+                      icon: CaseLower,
+                      action: runBulkEdit({ kind: "changeCase", mode: "lower" }),
+                    },
+                    {
+                      label: t("dataGrid.titleCase"),
+                      icon: CaseSensitive,
+                      action: runBulkEdit({ kind: "changeCase", mode: "title" }),
+                    },
+                  ],
                 });
               }
 

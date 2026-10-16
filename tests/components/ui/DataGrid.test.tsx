@@ -2278,3 +2278,185 @@ describe("DataGrid vertical scroll position across tab switches (#823)", () => {
     }
   });
 });
+
+describe("DataGrid Edit selection context menu (#1000)", () => {
+  const columns = ["id", "name", "city"];
+  const metadata = [
+    { name: "id", data_type: "integer", is_pk: true, is_nullable: false, is_auto_increment: false },
+    { name: "name", data_type: "varchar(50)", is_pk: false, is_nullable: false, is_auto_increment: false },
+    { name: "city", data_type: "varchar(50)", is_pk: false, is_nullable: true, is_auto_increment: false },
+  ];
+  const data: unknown[][] = [
+    [1, " alice ", "Portland"],
+    [2, "Bob", null],
+    [3, "cara", "denver"],
+  ];
+  const cellAt = (container: HTMLElement, rowIndex: number, colIndex: number) =>
+    container.querySelector(
+      `tr[data-row-index="${rowIndex}"] td[data-col-index="${colIndex}"]`,
+    )!;
+
+  const renderGrid = (overrides: Partial<ComponentProps<typeof DataGrid>> = {}) => {
+    const onPendingChange = vi.fn();
+    const utils = render(
+      <DataGrid
+        columns={columns}
+        data={data}
+        tableName="people"
+        pkColumns={["id"]}
+        columnMetadata={metadata}
+        nullableColumns={["city"]}
+        onPendingChange={onPendingChange}
+        selectedRows={new Set()}
+        onSelectionChange={vi.fn()}
+        {...overrides}
+      />,
+    );
+    return { ...utils, onPendingChange };
+  };
+
+  // Header text also appears in the column tooltip, so select by the header's own button.
+  const selectColumn = (colIndex: number) =>
+    fireEvent.click(screen.getAllByLabelText("dataGrid.selectColumn")[colIndex], {
+      metaKey: true,
+    });
+
+  const openEditSelection = async () => {
+    fireEvent.mouseEnter(await screen.findByText("dataGrid.editSelection"));
+  };
+
+  beforeEach(() => {
+    showToastMock.mockClear();
+    translationMock.mockClear();
+  });
+
+  it("changes the case of every cell in the range, not only the clicked one", async () => {
+    const { container, onPendingChange } = renderGrid();
+
+    fireEvent.click(cellAt(container, 0, 1));
+    fireEvent.click(cellAt(container, 2, 2), { shiftKey: true });
+    fireEvent.contextMenu(cellAt(container, 1, 1));
+    await openEditSelection();
+    fireEvent.click(await screen.findByText("dataGrid.upperCase"));
+
+    expect(onPendingChange.mock.calls).toEqual([
+      [{ id: 1 }, "name", " ALICE "],
+      [{ id: 2 }, "name", "BOB"],
+      [{ id: 3 }, "name", "CARA"],
+      [{ id: 1 }, "city", "PORTLAND"],
+      [{ id: 3 }, "city", "DENVER"],
+    ]);
+    expect(showToastMock).toHaveBeenCalledWith("dataGrid.editedCells", {
+      kind: "success",
+    });
+  });
+
+  it("fills a selected column down from its first cell", async () => {
+    const { container, onPendingChange } = renderGrid();
+
+    selectColumn(2);
+    fireEvent.contextMenu(cellAt(container, 2, 2));
+    await openEditSelection();
+    fireEvent.click(await screen.findByText("dataGrid.fillDown"));
+
+    expect(onPendingChange.mock.calls).toEqual([
+      [{ id: 2 }, "city", "Portland"],
+      [{ id: 3 }, "city", "Portland"],
+    ]);
+  });
+
+  it("transforms the pending value the grid shows, not the stored one", async () => {
+    const { container, onPendingChange } = renderGrid({
+      pendingChanges: {
+        [serializePkKey({ id: 2 })]: {
+          pkOriginalValue: { id: 2 },
+          changes: { name: "  Robert " },
+        },
+      },
+    });
+
+    selectColumn(1);
+    fireEvent.contextMenu(cellAt(container, 0, 1));
+    await openEditSelection();
+    fireEvent.click(await screen.findByText("dataGrid.trimWhitespace"));
+
+    expect(onPendingChange.mock.calls).toEqual([
+      [{ id: 1 }, "name", "alice"],
+      [{ id: 2 }, "name", "Robert"],
+    ]);
+  });
+
+  it("stages nothing and says so when the edit changes no cell", async () => {
+    const { container, onPendingChange } = renderGrid();
+
+    fireEvent.contextMenu(cellAt(container, 1, 1));
+    await openEditSelection();
+    fireEvent.click(await screen.findByText("dataGrid.titleCase"));
+
+    expect(onPendingChange).not.toHaveBeenCalled();
+    expect(showToastMock).toHaveBeenCalledWith("dataGrid.editSelectionNoChange", {
+      kind: "info",
+    });
+  });
+
+  it("disables fill down for a single row and offers Set NULL only on nullable columns", async () => {
+    const { container, onPendingChange } = renderGrid();
+
+    fireEvent.click(cellAt(container, 0, 1));
+    fireEvent.click(cellAt(container, 1, 2), { shiftKey: true });
+    fireEvent.contextMenu(cellAt(container, 0, 1));
+    await openEditSelection();
+    fireEvent.click(await screen.findByText("dataGrid.setNull"));
+
+    expect(onPendingChange.mock.calls).toEqual([[{ id: 1 }, "city", null]]);
+
+    fireEvent.click(cellAt(container, 0, 1));
+    fireEvent.contextMenu(cellAt(container, 0, 1));
+    await openEditSelection();
+    expect(
+      (await screen.findByText("dataGrid.fillDown")).closest("button"),
+    ).toBeDisabled();
+    expect(screen.queryByText("dataGrid.setNull")).toBeNull();
+  });
+
+  it("sets every selected cell to the value typed in the dialog", async () => {
+    const { container, onPendingChange } = renderGrid();
+
+    fireEvent.click(cellAt(container, 1, 1));
+    fireEvent.click(cellAt(container, 2, 2), { shiftKey: true });
+    fireEvent.contextMenu(cellAt(container, 2, 1));
+    await openEditSelection();
+    fireEvent.click(await screen.findByText("dataGrid.setToValue"));
+
+    fireEvent.change(screen.getByLabelText("dataGrid.setToValueLabel"), {
+      target: { value: "n/a" },
+    });
+    fireEvent.click(screen.getByText("dataGrid.setToValueApply"));
+
+    expect(onPendingChange.mock.calls).toEqual([
+      [{ id: 2 }, "name", "n/a"],
+      [{ id: 3 }, "name", "n/a"],
+      [{ id: 2 }, "city", "n/a"],
+      [{ id: 3 }, "city", "n/a"],
+    ]);
+    expect(screen.queryByLabelText("dataGrid.setToValueLabel")).toBeNull();
+  });
+
+  it.each([
+    ["a read-only grid", { readonly: true }, "dataGrid.editSelectionReadOnly"],
+    ["a result without a source table", { tableName: null }, "dataGrid.editSelectionNoTable"],
+    ["a table without a primary key", { pkColumns: null }, "dataGrid.editSelectionNoKey"],
+  ])("shows the submenu disabled with the reason on %s", async (_, overrides, reason) => {
+    const { container } = renderGrid(overrides);
+
+    fireEvent.contextMenu(cellAt(container, 0, 1));
+
+    expect(
+      (await screen.findByText("dataGrid.editSelectionUnavailable")).closest("button"),
+    ).toBeDisabled();
+    expect(screen.queryByText("dataGrid.editSelection")).toBeNull();
+    expect(translationMock).toHaveBeenCalledWith("dataGrid.editSelectionUnavailable", {
+      reason,
+    });
+  });
+});
