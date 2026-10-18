@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { moveTab } from "../../src/utils/tabDnd";
+import { getAdjacentTabGap, moveTab } from "../../src/utils/tabDnd";
 import type { Tab } from "../../src/types/editor";
 
 function makeTab(id: string, connectionId: string): Tab {
@@ -101,6 +101,43 @@ describe("tabDnd", () => {
       const tabs = [makeTab("a", "c1"), makeTab("b", "c2"), makeTab("c", "c1")];
       // c2 has only one tab, so nothing should change when acting on c2.
       expect(moveTab(tabs, "c2", "b", 0)).toBe(tabs);
+    });
+  });
+
+  describe("getAdjacentTabGap", () => {
+    const tabs = [
+      makeTab("a", "c1"),
+      makeTab("x", "c2"),
+      makeTab("b", "c1"),
+      makeTab("c", "c1"),
+      makeTab("y", "c2"),
+    ];
+
+    it("should move a middle tab exactly one position in either direction", () => {
+      const left = getAdjacentTabGap(tabs, "c1", "b", "left");
+      const right = getAdjacentTabGap(tabs, "c1", "b", "right");
+      expect(left).not.toBeNull();
+      expect(right).not.toBeNull();
+      expect(moveTab(tabs, "c1", "b", left!).map((t) => t.id)).toEqual(["b", "x", "a", "c", "y"]);
+      expect(moveTab(tabs, "c1", "b", right!).map((t) => t.id)).toEqual(["a", "x", "c", "b", "y"]);
+    });
+
+    it("should return null at the connection's own edges, ignoring other connections' tabs", () => {
+      expect(getAdjacentTabGap(tabs, "c1", "a", "left")).toBeNull();
+      expect(getAdjacentTabGap(tabs, "c1", "c", "right")).toBeNull();
+      expect(getAdjacentTabGap(tabs, "c2", "x", "left")).toBeNull();
+      expect(getAdjacentTabGap(tabs, "c2", "y", "right")).toBeNull();
+    });
+
+    it("should return null for the only tab of a connection", () => {
+      const single = [makeTab("a", "c1"), makeTab("x", "c2")];
+      expect(getAdjacentTabGap(single, "c2", "x", "left")).toBeNull();
+      expect(getAdjacentTabGap(single, "c2", "x", "right")).toBeNull();
+    });
+
+    it("should return null for an unknown tab id or another connection's tab", () => {
+      expect(getAdjacentTabGap(tabs, "c1", "missing", "right")).toBeNull();
+      expect(getAdjacentTabGap(tabs, "c1", "x", "right")).toBeNull();
     });
   });
 });

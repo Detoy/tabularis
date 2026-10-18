@@ -1498,6 +1498,8 @@
     "duplicateTab": "Duplicar Aba",
     "closeTab": "Fechar Aba",
     "reopenClosedTab": "Reabrir Aba Fechada",
+    "moveTabLeft": "Mover Aba para a Esquerda",
+    "moveTabRight": "Mover Aba para a Direita",
     "closeOthers": "Fechar Outras Abas",
     "closeRight": "Fechar Abas à Direita",
     "closeLeft": "Fechar Abas à Esquerda",

@@ -1456,6 +1456,8 @@
     "duplicateTab": "탭 복제",
     "closeTab": "탭 닫기",
     "reopenClosedTab": "닫은 탭 다시 열기",
+    "moveTabLeft": "탭을 왼쪽으로 이동",
+    "moveTabRight": "탭을 오른쪽으로 이동",
     "closeOthers": "다른 탭 닫기",
     "closeRight": "오른쪽 탭 닫기",
     "closeLeft": "왼쪽 탭 닫기",

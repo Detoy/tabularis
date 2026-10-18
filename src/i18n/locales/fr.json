@@ -1521,6 +1521,8 @@
     "duplicateTab": "Dupliquer l’onglet",
     "closeTab": "Fermer l’onglet",
     "reopenClosedTab": "Réouvrir l’onglet fermé",
+    "moveTabLeft": "Déplacer l’onglet à gauche",
+    "moveTabRight": "Déplacer l’onglet à droite",
     "closeOthers": "Fermer les autres onglets",
     "closeRight": "Fermer les onglets à droite",
     "closeLeft": "Fermer les onglets à gauche",

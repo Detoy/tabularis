@@ -71,6 +71,8 @@ import {
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
+  ArrowLeft,
+  ArrowRight,
   ArrowLeftToLine,
   ArrowRightToLine,
   XCircle,
@@ -203,6 +205,7 @@ import {
   type ColumnStatsSupport,
 } from "../utils/columnStats";
 import { getNextSortClause } from "../utils/tableToolbar";
+import { getAdjacentTabGap } from "../utils/tabDnd";
 import {
   createSqlFileTab,
   getSqlFileName,
@@ -5993,6 +5996,12 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
       />
       {tabContextMenu && (() => {
         const contextTab = tabs.find((t) => t.id === tabContextMenu.tabId);
+        const moveGap = (direction: "left" | "right") =>
+          contextTab
+            ? getAdjacentTabGap(tabs, contextTab.connectionId, contextTab.id, direction)
+            : null;
+        const leftGap = moveGap("left");
+        const rightGap = moveGap("right");
         return (
         <ContextMenu
           x={tabContextMenu.x}
@@ -6050,6 +6059,24 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
               disabled: !canReopenClosedTab,
               action: () => reopenClosedTab(),
             },
+            { separator: true },
+            {
+              label: t("editor.moveTabLeft"),
+              icon: ArrowLeft,
+              disabled: leftGap === null,
+              action: () => {
+                if (leftGap !== null) reorderTab(tabContextMenu.tabId, leftGap);
+              },
+            },
+            {
+              label: t("editor.moveTabRight"),
+              icon: ArrowRight,
+              disabled: rightGap === null,
+              action: () => {
+                if (rightGap !== null) reorderTab(tabContextMenu.tabId, rightGap);
+              },
+            },
+            { separator: true },
             {
               label: t("editor.closeTab"),
               icon: X,

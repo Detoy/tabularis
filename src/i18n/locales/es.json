@@ -1527,6 +1527,8 @@
     "duplicateTab": "Duplicar Pestaña",
     "closeTab": "Cerrar Pestaña",
     "reopenClosedTab": "Reabrir Pestaña Cerrada",
+    "moveTabLeft": "Mover Pestaña a la Izquierda",
+    "moveTabRight": "Mover Pestaña a la Derecha",
     "closeOthers": "Cerrar Otras Pestañas",
     "closeRight": "Cerrar Pestañas a la Derecha",
     "closeLeft": "Cerrar Pestañas a la Izquierda",

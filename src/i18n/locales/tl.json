@@ -1512,6 +1512,8 @@
     "duplicateTab": "I-duplicate ang Tab",
     "closeTab": "Isara ang Tab",
     "reopenClosedTab": "Muling Buksan ang Saradong Tab",
+    "moveTabLeft": "Ilipat ang Tab sa Kaliwa",
+    "moveTabRight": "Ilipat ang Tab sa Kanan",
     "closeOthers": "Isara ang Ibang Tab",
     "closeRight": "Isara ang mga Tab sa Kanan",
     "closeLeft": "Isara ang mga Tab sa Kaliwa",

@@ -1551,6 +1551,8 @@
     "duplicateTab": "Duplicate Tab",
     "closeTab": "Close Tab",
     "reopenClosedTab": "Reopen Closed Tab",
+    "moveTabLeft": "Move Tab Left",
+    "moveTabRight": "Move Tab Right",
     "closeOthers": "Close Other Tabs",
     "closeRight": "Close Tabs to Right",
     "closeLeft": "Close Tabs to Left",

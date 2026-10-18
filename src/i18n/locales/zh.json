@@ -1474,6 +1474,8 @@
     "duplicateTab": "复制标签",
     "closeTab": "关闭标签",
     "reopenClosedTab": "重新打开已关闭的标签",
+    "moveTabLeft": "向左移动标签",
+    "moveTabRight": "向右移动标签",
     "closeOthers": "关闭其他标签",
     "closeRight": "关闭右侧标签",
     "closeLeft": "关闭左侧标签",

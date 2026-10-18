@@ -1542,6 +1542,8 @@
     "duplicateTab": "Duplica scheda",
     "closeTab": "Chiudi scheda",
     "reopenClosedTab": "Riapri scheda chiusa",
+    "moveTabLeft": "Sposta scheda a sinistra",
+    "moveTabRight": "Sposta scheda a destra",
     "closeOthers": "Chiudi altre schede",
     "closeRight": "Chiudi schede a destra",
     "closeLeft": "Chiudi schede a sinistra",

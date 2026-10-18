@@ -1511,6 +1511,8 @@
     "duplicateTab": "タブを複製",
     "closeTab": "タブを閉じる",
     "reopenClosedTab": "閉じたタブを再度開く",
+    "moveTabLeft": "タブを左に移動",
+    "moveTabRight": "タブを右に移動",
     "closeOthers": "他のタブを閉じる",
     "closeRight": "右側のタブを閉じる",
     "closeLeft": "左側のタブを閉じる",

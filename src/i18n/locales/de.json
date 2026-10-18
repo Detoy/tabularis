@@ -1499,6 +1499,8 @@
     "duplicateTab": "Tab duplizieren",
     "closeTab": "Tab schließen",
     "reopenClosedTab": "Geschlossenen Tab wieder öffnen",
+    "moveTabLeft": "Tab nach links verschieben",
+    "moveTabRight": "Tab nach rechts verschieben",
     "closeOthers": "Andere Tabs schließen",
     "closeRight": "Tabs rechts schließen",
     "closeLeft": "Tabs links schließen",

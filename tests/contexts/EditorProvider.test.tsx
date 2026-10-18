@@ -3,6 +3,7 @@ import { renderHook, waitFor, act } from "@testing-library/react";
 import { EditorProvider } from "../../src/contexts/EditorProvider";
 import { useEditor } from "../../src/hooks/useEditor";
 import { buildDuplicatedTab } from "../../src/utils/editor";
+import { getAdjacentTabGap } from "../../src/utils/tabDnd";
 import { DatabaseContext } from "../../src/contexts/DatabaseContext";
 import { invoke } from "@tauri-apps/api/core";
 import React from "react";
@@ -492,6 +493,53 @@ describe("EditorProvider", () => {
     // After closing tabs to the right of the table tab, we should have console and table
     expect(result.current.tabs[0].type).toBe("console");
     expect(result.current.tabs[1].type).toBe("table");
+  });
+
+  it("moves a tab one position left or right, keeping the active tab and the tab's content", () => {
+    const wrapper = createWrapper("conn-1");
+    const { result } = renderHook(() => useEditor(), { wrapper });
+
+    act(() => {
+      result.current.addTab({ type: "console" });
+    });
+    act(() => {
+      result.current.addTab({ type: "console" });
+    });
+    act(() => {
+      result.current.addTab({ type: "console" });
+    });
+
+    const [firstId, middleId, lastId] = result.current.tabs.map((t) => t.id);
+    const liveResult = { columns: ["id"], rows: [[1]], affected_rows: 0 };
+    act(() => {
+      result.current.updateTab(middleId, {
+        query: "SELECT * FROM users",
+        result: liveResult,
+        pendingChanges: { "1": { pkOriginalValue: 1, changes: { name: "Ada" } } },
+      });
+      result.current.setActiveTabId(firstId);
+    });
+    const middleTab = result.current.tabs[1];
+
+    const moveMiddle = (direction: "left" | "right") => {
+      const gap = getAdjacentTabGap(result.current.tabs, "conn-1", middleId, direction);
+      expect(gap).not.toBeNull();
+      act(() => {
+        result.current.reorderTab(middleId, gap!);
+      });
+    };
+
+    moveMiddle("right");
+    expect(result.current.tabs.map((t) => t.id)).toEqual([firstId, lastId, middleId]);
+    expect(getAdjacentTabGap(result.current.tabs, "conn-1", middleId, "right")).toBeNull();
+
+    moveMiddle("left");
+    moveMiddle("left");
+    expect(result.current.tabs.map((t) => t.id)).toEqual([middleId, firstId, lastId]);
+    expect(getAdjacentTabGap(result.current.tabs, "conn-1", middleId, "left")).toBeNull();
+
+    expect(result.current.activeTabId).toBe(firstId);
+    expect(result.current.tabs[0]).toEqual(middleTab);
   });
 
   it("should update tab properties", () => {

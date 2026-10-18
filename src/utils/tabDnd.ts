@@ -31,3 +31,22 @@ export function moveTab(
   let i = 0;
   return tabs.map((t) => (t.connectionId === connectionId ? reordered[i++] : t));
 }
+
+/**
+ * Gap index for `moveTab` that shifts a tab one position among its
+ * connection's own tabs, or `null` when the tab is already at that edge.
+ * Moving right targets `index + 2` because `index + 1` is the tab's own
+ * trailing gap.
+ */
+export function getAdjacentTabGap(
+  tabs: Tab[],
+  connectionId: string,
+  tabId: string,
+  direction: "left" | "right",
+): number | null {
+  const connectionTabs = tabs.filter((t) => t.connectionId === connectionId);
+  const index = connectionTabs.findIndex((t) => t.id === tabId);
+  if (index === -1) return null;
+  const gap = direction === "left" ? index - 1 : index + 2;
+  return gap < 0 || gap > connectionTabs.length ? null : gap;
+}
