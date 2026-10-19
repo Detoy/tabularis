@@ -16,9 +16,13 @@ import {formatSqlPreview} from '@/utils/sqlHighlight';
 import {useSettings} from '@/hooks/useSettings';
 import {
     filterQueryHistoryEntries,
+    getQueryHistoryDatabaseChoices,
+    isQueryHistoryDatabaseFilterAvailable,
     isQueryHistoryFilterActive,
+    queryHistoryDatabaseFilterFor,
     QUERY_HISTORY_OUTCOME_OPTIONS,
     QUERY_HISTORY_TIME_RANGE_OPTIONS,
+    type QueryHistoryDatabaseFilter,
     type QueryHistoryOutcomeFilter,
     type QueryHistoryTimeRange,
 } from '@/utils/queryHistoryFilter';
@@ -73,9 +77,22 @@ export function QueryHistorySection({
     const [search, setSearch] = useState('');
     const [outcome, setOutcome] = useState<QueryHistoryOutcomeFilter>('any');
     const [timeRange, setTimeRange] = useState<QueryHistoryTimeRange>('all');
+    const [database, setDatabase] = useState<QueryHistoryDatabaseFilter>('all');
     const [selectedId, setSelectedId] = useState<string | null>(null);
 
-    const filterActive = isQueryHistoryFilterActive({search, outcome, timeRange});
+    const databaseChoices = useMemo(() => getQueryHistoryDatabaseChoices(entries), [entries]);
+    // A database that is no longer among the loaded entries (another connection's
+    // history, or its last entry was deleted) falls back to "All databases".
+    if (!isQueryHistoryDatabaseFilterAvailable(database, databaseChoices)) {
+        setDatabase('all');
+    }
+
+    const filterActive = isQueryHistoryFilterActive({
+        search,
+        outcome,
+        timeRange,
+        database,
+    });
 
     const filteredEntries = useMemo(
         () =>
@@ -83,9 +100,10 @@ export function QueryHistorySection({
                 search,
                 outcome,
                 timeRange,
+                database,
                 timeZone: settings.displayTimezone,
             }),
-        [entries, search, outcome, timeRange, settings.displayTimezone],
+        [entries, search, outcome, timeRange, database, settings.displayTimezone],
     );
 
     const groupedEntries = useMemo(
@@ -243,6 +261,32 @@ export function QueryHistorySection({
                 </button>
             </div>
             {pausedBanner}
+
+            {/* Database filter (session-only, same as search) */}
+            <div className="px-2 pb-1.5">
+                <div className="relative min-w-0">
+                    <select
+                        value={database}
+                        onChange={(e) => setDatabase(e.target.value as QueryHistoryDatabaseFilter)}
+                        aria-label={t('sidebar.historyDatabaseFilter')}
+                        className={selectClassName}
+                    >
+                        <option value="all">{t('sidebar.historyDatabaseAll')}</option>
+                        {databaseChoices.databases.map((name) => (
+                            <option key={name} value={queryHistoryDatabaseFilterFor(name)}>
+                                {name}
+                            </option>
+                        ))}
+                        {databaseChoices.hasUnrecorded && (
+                            <option value="none">{t('sidebar.historyDatabaseNone')}</option>
+                        )}
+                    </select>
+                    <ChevronDown
+                        size={10}
+                        className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted pointer-events-none"
+                    />
+                </div>
+            </div>
 
             {/* Outcome + time filters (session-only, same as search) */}
             <div className="px-2 pb-1.5 flex items-center gap-1">

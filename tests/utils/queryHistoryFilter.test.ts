@@ -1,6 +1,12 @@
 import {describe, it, expect} from 'vitest';
 import type {QueryHistoryEntry} from '@/types/queryHistory';
-import {filterQueryHistoryEntries, isQueryHistoryFilterActive} from '@/utils/queryHistoryFilter';
+import {
+    filterQueryHistoryEntries,
+    getQueryHistoryDatabaseChoices,
+    isQueryHistoryDatabaseFilterAvailable,
+    isQueryHistoryFilterActive,
+    queryHistoryDatabaseFilterFor,
+} from '@/utils/queryHistoryFilter';
 
 const NOW = new Date('2026-04-15T14:00:00.000Z');
 
@@ -75,6 +81,16 @@ describe('queryHistoryFilter', () => {
             expect(isQueryHistoryFilterActive({search: 'select'})).toBe(true);
             expect(isQueryHistoryFilterActive({outcome: 'failed'})).toBe(true);
             expect(isQueryHistoryFilterActive({timeRange: 'today'})).toBe(true);
+        });
+
+        it('is true when a database choice other than all is set', () => {
+            expect(isQueryHistoryFilterActive({database: 'all'})).toBe(false);
+            expect(isQueryHistoryFilterActive({database: 'none'})).toBe(true);
+            expect(
+                isQueryHistoryFilterActive({
+                    database: queryHistoryDatabaseFilterFor('sales'),
+                }),
+            ).toBe(true);
         });
     });
 
@@ -201,6 +217,121 @@ describe('queryHistoryFilter', () => {
                     now: NOW,
                 }).map((e) => e.id),
             ).toEqual(['bad-date']);
+        });
+    });
+
+    describe('database filter', () => {
+        const DB_ENTRIES: QueryHistoryEntry[] = [
+            entry({id: 'sales-1', sql: 'SELECT * FROM orders', database: 'sales'}),
+            entry({
+                id: 'hr-fail',
+                sql: 'SELECT * FROM staff',
+                database: 'hr',
+                status: 'error',
+            }),
+            entry({id: 'legacy', sql: 'SELECT * FROM orders', database: null}),
+            entry({id: 'empty-db', sql: 'SELECT 2', database: ''}),
+            entry({
+                id: 'sales-2',
+                sql: 'UPDATE orders SET paid = true',
+                database: 'sales',
+                status: 'error',
+            }),
+            entry({id: 'sales-upper', sql: 'SELECT 3', database: 'Sales'}),
+        ];
+
+        it('keeps only the entries recorded for the chosen database', () => {
+            expect(
+                filterQueryHistoryEntries(DB_ENTRIES, {
+                    database: queryHistoryDatabaseFilterFor('sales'),
+                    now: NOW,
+                }).map((e) => e.id),
+            ).toEqual(['sales-1', 'sales-2']);
+        });
+
+        it('keeps only entries without a recorded database for the none choice', () => {
+            expect(
+                filterQueryHistoryEntries(DB_ENTRIES, {
+                    database: 'none',
+                    now: NOW,
+                }).map((e) => e.id),
+            ).toEqual(['legacy', 'empty-db']);
+        });
+
+        it('does not confuse a database named like a choice with that choice', () => {
+            const entries = [
+                entry({id: 'named-all', sql: 'SELECT 1', database: 'all'}),
+                entry({id: 'named-none', sql: 'SELECT 1', database: 'none'}),
+                entry({id: 'unrecorded', sql: 'SELECT 1', database: null}),
+            ];
+            expect(
+                filterQueryHistoryEntries(entries, {
+                    database: queryHistoryDatabaseFilterFor('none'),
+                    now: NOW,
+                }).map((e) => e.id),
+            ).toEqual(['named-none']);
+            expect(
+                filterQueryHistoryEntries(entries, {
+                    database: queryHistoryDatabaseFilterFor('all'),
+                    now: NOW,
+                }).map((e) => e.id),
+            ).toEqual(['named-all']);
+        });
+
+        it('combines the database with search, outcome and time range using AND', () => {
+            expect(
+                filterQueryHistoryEntries(DB_ENTRIES, {
+                    database: queryHistoryDatabaseFilterFor('sales'),
+                    search: 'orders',
+                    outcome: 'failed',
+                    timeRange: 'lastHour',
+                    now: NOW,
+                }).map((e) => e.id),
+            ).toEqual(['sales-2']);
+            expect(
+                filterQueryHistoryEntries(DB_ENTRIES, {
+                    database: 'none',
+                    search: 'orders',
+                    now: NOW,
+                }).map((e) => e.id),
+            ).toEqual(['legacy']);
+        });
+
+        it('lists the loaded databases once, sorted, and flags unrecorded entries', () => {
+            expect(getQueryHistoryDatabaseChoices(DB_ENTRIES)).toEqual({
+                databases: ['hr', 'sales', 'Sales'],
+                hasUnrecorded: true,
+            });
+            expect(
+                getQueryHistoryDatabaseChoices(DB_ENTRIES.filter((e) => e.database === 'sales')),
+            ).toEqual({databases: ['sales'], hasUnrecorded: false});
+            expect(getQueryHistoryDatabaseChoices([])).toEqual({
+                databases: [],
+                hasUnrecorded: false,
+            });
+        });
+
+        it('reports whether a choice still exists among the loaded entries', () => {
+            const choices = getQueryHistoryDatabaseChoices(DB_ENTRIES);
+            expect(isQueryHistoryDatabaseFilterAvailable('all', choices)).toBe(true);
+            expect(isQueryHistoryDatabaseFilterAvailable('none', choices)).toBe(true);
+            expect(
+                isQueryHistoryDatabaseFilterAvailable(queryHistoryDatabaseFilterFor('hr'), choices),
+            ).toBe(true);
+            expect(
+                isQueryHistoryDatabaseFilterAvailable(
+                    queryHistoryDatabaseFilterFor('billing'),
+                    choices,
+                ),
+            ).toBe(false);
+
+            const recordedOnly = getQueryHistoryDatabaseChoices(
+                DB_ENTRIES.filter((e) => e.database === 'hr'),
+            );
+            expect(isQueryHistoryDatabaseFilterAvailable('none', recordedOnly)).toBe(false);
+            expect(
+                isQueryHistoryDatabaseFilterAvailable('all', {databases: [], hasUnrecorded: false}),
+            ).toBe(true);
         });
     });
 });
