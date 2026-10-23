@@ -1369,14 +1369,17 @@ describe('resolveLockedColumnWidths', () => {
 describe('getFrozenFirstColumnLayout', () => {
     it('should sit after the fallback gutter width before columns are measured', () => {
         expect(getFrozenFirstColumnLayout(null)).toEqual({
-            left: 50,
+            left: 49,
             scrollPaddingLeft: 50,
         });
     });
 
-    it('should use the measured gutter and first column widths', () => {
+    // The collapsed border between the gutter and the column belongs to the
+    // column's box but is painted by the table where the column started, so the
+    // sticky cell is pulled 1px under the gutter to cover it.
+    it('should overlap the gutter by the shared 1px border', () => {
         expect(getFrozenFirstColumnLayout([58, 120, 200])).toEqual({
-            left: 58,
+            left: 57,
             scrollPaddingLeft: 178,
         });
     });

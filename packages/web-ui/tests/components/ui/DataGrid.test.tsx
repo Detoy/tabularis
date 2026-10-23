@@ -3334,7 +3334,7 @@ describe('DataGrid freeze first column (#1152)', () => {
             cellAt(container, 1, 0),
         ]) {
             expect(cell).toHaveClass('sticky');
-            expect(cell.style.left).toBe('50px');
+            expect(cell.style.left).toBe('49px');
         }
         // The cell's own tint is repainted above the opaque backdrop.
         expect(cellAt(container, 0, 0)).toHaveClass('after:bg-inherit');

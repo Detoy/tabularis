@@ -867,8 +867,19 @@ export function getResizedTableWidth(
 /** Row-number gutter width before the grid has measured its columns. */
 export const DATA_GRID_GUTTER_FALLBACK_WIDTH = 50;
 
+/**
+ * Width of the collapsed border between the gutter and the first column. The
+ * table paints it where the column started, inside the column's box, so a
+ * sticky cell at the full gutter width leaves a 1px strip of scrolled content
+ * showing at the gutter edge.
+ */
+const DATA_GRID_GUTTER_BORDER_WIDTH = 1;
+
 export interface FrozenFirstColumnLayout {
-    /** Sticky `left` offset of the frozen column: right after the gutter. */
+    /**
+     * Sticky `left` offset of the frozen column: right after the gutter, pulled
+     * under its shared border so the border strip is covered too.
+     */
     left: number;
     /**
      * Scroll padding that keeps `scrollIntoView` from parking the active cell
@@ -885,8 +896,11 @@ export interface FrozenFirstColumnLayout {
 export function getFrozenFirstColumnLayout(
     columnWidths: readonly number[] | null,
 ): FrozenFirstColumnLayout {
-    const left = columnWidths?.[0] ?? DATA_GRID_GUTTER_FALLBACK_WIDTH;
-    return {left, scrollPaddingLeft: left + (columnWidths?.[1] ?? 0)};
+    const gutter = columnWidths?.[0] ?? DATA_GRID_GUTTER_FALLBACK_WIDTH;
+    return {
+        left: gutter - DATA_GRID_GUTTER_BORDER_WIDTH,
+        scrollPaddingLeft: gutter + (columnWidths?.[1] ?? 0),
+    };
 }
 
 export interface FrozenCellRowState {
@@ -899,9 +913,9 @@ export interface FrozenCellRowState {
 // Both layers sit under the cell content. `::before` is the opaque row
 // background, `::after` repaints the cell's own tint (selection, edits) on top.
 // Collapsed table borders stay where the column started, so `::before` also
-// covers the gap at the gutter edge and draws the frozen column's right border.
+// draws the frozen column's right border.
 const FROZEN_CELL_LAYERS =
-    'before:absolute before:inset-y-0 before:-left-px before:right-0 before:-z-10 before:pointer-events-none before:transition-colors before:border-r before:border-default after:absolute after:inset-0 after:-z-10 after:pointer-events-none after:bg-inherit';
+    'before:absolute before:inset-0 before:-z-10 before:pointer-events-none before:transition-colors before:border-r before:border-default after:absolute after:inset-0 after:-z-10 after:pointer-events-none after:bg-inherit';
 
 /**
  * Frozen header cell: the header background under its own tint, stacked below
