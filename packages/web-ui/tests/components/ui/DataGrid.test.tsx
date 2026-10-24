@@ -3280,6 +3280,41 @@ describe('DataGrid column resizing (#1151)', () => {
         expect(col(1).style.width).toBe(`${MEASURED}px`);
         expect(separators()).toHaveLength(2);
     });
+
+    it('resizes a frozen first column with its offset and scroll padding in step', async () => {
+        const {container, col} = renderGrid();
+        const header = (index: number) =>
+            container.querySelector<HTMLElement>(`th[data-col-index="${index}"]`)!;
+        const grid = container.querySelector<HTMLElement>('div[tabindex="0"]')!;
+        fireEvent.contextMenu(header(2));
+        fireEvent.click(await screen.findByText('dataGrid.freezeFirstColumn'));
+
+        // The sticky cell is the handle's containing block, so it is not also
+        // made relative; the other headers still are.
+        expect(header(0)).toHaveClass('sticky');
+        expect(header(0)).not.toHaveClass('relative');
+        expect(header(1)).toHaveClass('relative');
+        expect(header(0)).toContainElement(separators()[0]);
+        // Right after the gutter, under its 1px collapsed border.
+        const frozenLeft = `${MEASURED - 1}px`;
+        expect(header(0).style.left).toBe(frozenLeft);
+        expect(grid.style.scrollPaddingLeft).toBe(`${MEASURED * 2}px`);
+
+        fireEvent.mouseDown(separators()[0], {button: 0, clientX: 300});
+        fireEvent.mouseMove(window, {clientX: 360});
+        fireEvent.mouseUp(window);
+        expect(col(1).style.width).toBe('160px');
+        // The column still starts right after the gutter; the padding follows its width.
+        expect(header(0).style.left).toBe(frozenLeft);
+        expect(container.querySelector<HTMLElement>('td[data-col-index="0"]')!.style.left).toBe(
+            frozenLeft,
+        );
+        expect(grid.style.scrollPaddingLeft).toBe(`${MEASURED + 160}px`);
+
+        fireEvent.keyDown(separators()[0], {key: 'ArrowLeft', shiftKey: true});
+        expect(col(1).style.width).toBe('110px');
+        expect(grid.style.scrollPaddingLeft).toBe(`${MEASURED + 110}px`);
+    });
 });
 
 describe('DataGrid freeze first column (#1152)', () => {
