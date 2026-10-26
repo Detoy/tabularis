@@ -100,6 +100,8 @@ export interface ConnectionParams {
     startup_script?: string;
     /** Connection pooler mode for PgBouncer / transaction-mode poolers. */
     pooler_mode?: string;
+    /** Seconds to wait for a new connection; unset keeps the driver default. */
+    connect_timeout_secs?: number;
     /** Opaque plugin-specific connection fields (e.g. `region` for a DynamoDB
      * plugin). Persisted as-is and forwarded verbatim to the driver/plugin. */
     extra?: Record<string, string>;

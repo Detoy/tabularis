@@ -170,6 +170,8 @@ interface ConnectionParams {
     startup_script?: string;
     /** Connection pooler mode for PgBouncer / transaction-mode poolers. */
     pooler_mode?: string;
+    /** Seconds to wait for a new connection; unset keeps the driver default. */
+    connect_timeout_secs?: number;
     // Opaque plugin-specific connection fields, forwarded verbatim to the
     // driver/plugin and persisted as-is in connections.json.
     extra?: Record<string, string>;
@@ -3218,6 +3220,26 @@ export const NewConnectionModal = ({
                     />
                 </div>
             </div>
+
+            {(driver === 'mysql' || driver === 'postgres') && (
+                <div className="flex flex-col gap-1">
+                    <FieldInput
+                        label={t('newConnection.connectTimeout')}
+                        value={formData.connect_timeout_secs}
+                        onChange={(v) =>
+                            updateField(
+                                'connect_timeout_secs',
+                                v === '' ? undefined : Math.max(0, Math.floor(Number(v))),
+                            )
+                        }
+                        type="number"
+                        placeholder={driver === 'mysql' ? '60' : undefined}
+                    />
+                    <p className="text-xs text-muted leading-snug">
+                        {t('newConnection.connectTimeoutHint')}
+                    </p>
+                </div>
+            )}
 
             {/* PostgreSQL: pooler mode (PgBouncer transaction/session) */}
             {isPostgresDialect && (
