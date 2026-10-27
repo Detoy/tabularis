@@ -109,6 +109,21 @@ export interface ConnectionParams {
     proxy?: ProxyOverride;
 }
 
+/** Upper bound for `connect_timeout_secs`; the backend reads it as a u32. */
+export const MAX_CONNECT_TIMEOUT_SECS = 3600;
+
+/**
+ * Parse the connect timeout field into whole seconds in
+ * [0, MAX_CONNECT_TIMEOUT_SECS]. Empty or non-numeric input (including
+ * overflow such as `1e999`) returns undefined, which keeps the driver default.
+ */
+export function parseConnectTimeoutSecs(raw: string): number | undefined {
+    if (raw.trim() === '') return undefined;
+    const secs = Number(raw);
+    if (!Number.isFinite(secs)) return undefined;
+    return Math.min(MAX_CONNECT_TIMEOUT_SECS, Math.max(0, Math.floor(secs)));
+}
+
 /**
  * Drop blank `ssl_mode` so the backend applies the driver default. The backend
  * persists an omitted mode as `null`, so a connection loaded from disk can

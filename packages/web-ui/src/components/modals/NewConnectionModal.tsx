@@ -67,7 +67,7 @@ import {
     isSchemaBasedMultiDbCapable,
     hasOptedIntoDatabaseSelection,
 } from '@/utils/database';
-import {updateExtraField, withoutBlankSslMode} from '@/utils/connections';
+import {parseConnectTimeoutSecs, updateExtraField, withoutBlankSslMode} from '@/utils/connections';
 import {normalizeLocalDatabasePath, sanitizeLocalFilePath} from '@/utils/fsPath';
 import {
     IN_MEMORY_DATABASE,
@@ -3227,10 +3227,7 @@ export const NewConnectionModal = ({
                         label={t('newConnection.connectTimeout')}
                         value={formData.connect_timeout_secs}
                         onChange={(v) =>
-                            updateField(
-                                'connect_timeout_secs',
-                                v === '' ? undefined : Math.max(0, Math.floor(Number(v))),
-                            )
+                            updateField('connect_timeout_secs', parseConnectTimeoutSecs(v))
                         }
                         type="number"
                         placeholder={driver === 'mysql' ? '60' : undefined}

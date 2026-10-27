@@ -2208,6 +2208,21 @@ describe('NewConnectionModal connect timeout', () => {
         );
     });
 
+    it('caps a timeout above one hour before saving', async () => {
+        renderModal(createInitialConnection({host: 'localhost'}));
+        fireEvent.click(await screen.findByText('newConnection.advanced'));
+        fireEvent.change(connectTimeoutInput(), {target: {value: '99999999999'}});
+        fireEvent.click(screen.getByText('newConnection.save'));
+        await waitFor(() =>
+            expect(invoke).toHaveBeenCalledWith(
+                'update_connection',
+                expect.objectContaining({
+                    params: expect.objectContaining({connect_timeout_secs: 3600}),
+                }),
+            ),
+        );
+    });
+
     it('drops the timeout when the field is cleared', async () => {
         renderModal(createInitialConnection({host: 'localhost', connect_timeout_secs: 15}));
         fireEvent.click(await screen.findByText('newConnection.advanced'));
