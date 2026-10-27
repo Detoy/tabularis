@@ -419,6 +419,7 @@
     "confirmDelete": "Are you sure you want to delete this connection?",
     "deleteTitle": "Confirm Delete",
     "failConnect": "Failed to connect to {{name}}. Please check your settings or ensuring the database is running.",
+    "linkUnavailable": "This connection link couldn't be opened. The connection may have been deleted, or the database may be unreachable.",
     "failDisconnect": "Failed to disconnect from database",
     "failDelete": "Failed to delete connection",
     "failDuplicate": "Failed to duplicate connection",

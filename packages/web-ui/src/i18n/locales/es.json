@@ -426,6 +426,7 @@
     "confirmDelete": "¿Estás seguro de que deseas eliminar esta conexión?",
     "deleteTitle": "Confirmar eliminación",
     "failConnect": "Error al conectar a {{name}}. Verifica tu configuración o asegúrate de que la base de datos esté en ejecución.",
+    "linkUnavailable": "No se pudo abrir este enlace de conexión. Es posible que la conexión se haya eliminado o que la base de datos no esté accesible.",
     "failDisconnect": "No se pudo desconectar de la base de datos",
     "failDelete": "No se pudo eliminar la conexión",
     "failDuplicate": "Error al duplicar la conexión",

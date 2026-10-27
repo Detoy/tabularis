@@ -390,6 +390,7 @@
     "confirmDelete": "Tem certeza que deseja excluir esta conexão?",
     "deleteTitle": "Confirmar Exclusão",
     "failConnect": "Falha ao conectar a {{name}}. Verifique suas configurações ou se o banco de dados está em execução.",
+    "linkUnavailable": "Não foi possível abrir este link de conexão. A conexão pode ter sido excluída ou o banco de dados pode estar inacessível.",
     "failDisconnect": "Falha ao desconectar do banco de dados",
     "failDelete": "Falha ao excluir a conexão",
     "failDuplicate": "Falha ao duplicar conexão",
