@@ -1271,7 +1271,9 @@ fn login_page_response(status: StatusCode, error: Option<&str>, target: Option<&
         CONTENT_TYPE,
         HeaderValue::from_static("text/html; charset=utf-8"),
     );
-    headers.insert(REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+    // Not `no-referrer`: with it, browsers send `Origin: null` on the form
+    // POST and the login origin check rejects every sign-in.
+    headers.insert(REFERRER_POLICY, HeaderValue::from_static("same-origin"));
     headers.insert(
         CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(

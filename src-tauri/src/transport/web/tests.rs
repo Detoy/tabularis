@@ -665,6 +665,14 @@ async fn password_login_resumes_a_connection_link() {
     let redirect = get("/settings").await.unwrap();
     assert_eq!(redirect.headers().get(LOCATION).unwrap(), "/login");
 
+    // A `no-referrer` page makes browsers send `Origin: null` with the form
+    // POST, which the login origin check rejects.
+    let login_page = get("/login").await.unwrap();
+    assert_eq!(
+        login_page.headers().get("referrer-policy").unwrap(),
+        "same-origin"
+    );
+
     // The form carries a valid target and drops anything else.
     let page = get(&format!("/login?next={}", "%2Fconnections%2Fabc%2Feditor"))
         .await
