@@ -144,6 +144,7 @@ vi.mock('@/hooks/useDrivers', () => ({
                         },
                     ],
                     supports_ssl: true,
+                    sql_dialect: 'mysql',
                 },
             },
             {
@@ -2234,6 +2235,24 @@ describe('NewConnectionModal connect timeout', () => {
                 'update_connection',
                 expect.objectContaining({
                     params: expect.not.objectContaining({connect_timeout_secs: expect.anything()}),
+                }),
+            ),
+        );
+    });
+
+    it('is offered for a plugin that declares a supported SQL dialect', async () => {
+        renderModal(createInitialConnection({driver: 'postgresql', host: 'localhost'}));
+        fireEvent.click(await screen.findByText('newConnection.advanced'));
+        fireEvent.change(connectTimeoutInput(), {target: {value: '20'}});
+        fireEvent.click(screen.getByText('newConnection.save'));
+        await waitFor(() =>
+            expect(invoke).toHaveBeenCalledWith(
+                'update_connection',
+                expect.objectContaining({
+                    params: expect.objectContaining({
+                        driver: 'postgresql',
+                        connect_timeout_secs: 20,
+                    }),
                 }),
             ),
         );

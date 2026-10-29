@@ -309,6 +309,7 @@ export const NewConnectionModal = ({
     // to this fix (e.g. the Oracle plugin, which sets supports_ssl but declares
     // no dialect).
     const isPostgresDialect = activeDriver?.capabilities?.sql_dialect === 'postgres';
+    const isMysqlDialect = activeDriver?.capabilities?.sql_dialect === 'mysql';
 
     // ── driver install state ──
     const [installStatus, setInstallStatus] = useState<'idle' | 'installing' | 'error'>('idle');
@@ -3221,7 +3222,7 @@ export const NewConnectionModal = ({
                 </div>
             </div>
 
-            {(driver === 'mysql' || driver === 'postgres') && (
+            {(isPostgresDialect || isMysqlDialect) && (
                 <div className="flex flex-col gap-1">
                     <FieldInput
                         label={t('newConnection.connectTimeout')}
@@ -3230,7 +3231,7 @@ export const NewConnectionModal = ({
                             updateField('connect_timeout_secs', parseConnectTimeoutSecs(v))
                         }
                         type="number"
-                        placeholder={driver === 'mysql' ? '60' : undefined}
+                        placeholder={isMysqlDialect ? '60' : undefined}
                     />
                     <p className="text-xs text-muted leading-snug">
                         {t('newConnection.connectTimeoutHint')}
