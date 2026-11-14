@@ -523,3 +523,65 @@ fn socks5_proxy_fields_sent_by_the_caller_are_discarded() {
     assert_eq!(resolved.socks5_proxy_password, None);
     assert_eq!(resolved.connection_uri.as_deref(), Some(SRV_URI));
 }
+
+#[test]
+fn ssh_tunnel_route_keeps_the_existing_keys() {
+    let fixed = ConnectionParams {
+        host: Some("db.internal".to_string()),
+        port: Some(5432),
+        ..ssh_params("postgres", "route-bastion", "postgres://db")
+    };
+    let (socks5, proxy, key) = ssh_tunnel_route(&fixed).unwrap();
+    assert!(!socks5);
+    assert!(proxy.is_none());
+    assert_eq!(
+        key,
+        crate::ssh_tunnel::build_tunnel_key("user", "route-bastion", 22, "db.internal", 5432)
+    );
+}
+
+#[test]
+fn ssh_tunnel_lease_names_the_cached_generation() {
+    let params = ssh_params("postgres", "lease-bastion", "postgres://db");
+    assert_eq!(ssh_tunnel_lease(&params), None);
+
+    let (_, _, key) = ssh_tunnel_route(&params).unwrap();
+    let tunnel = crate::ssh_tunnel::SshTunnel::russh_for_test(41010, true, None);
+    let generation = tunnel.generation;
+    cache(&key, tunnel);
+    let lease = ssh_tunnel_lease(&params);
+    forget(&key);
+
+    assert_eq!(lease, Some(TunnelLease { key, generation }));
+    let direct = ConnectionParams {
+        ssh_enabled: Some(false),
+        ..params
+    };
+    assert_eq!(ssh_tunnel_lease(&direct), None);
+}
+
+#[test]
+fn discard_stops_only_the_leased_generation() {
+    let key = "test-discard-tunnel-key";
+    let old = crate::ssh_tunnel::SshTunnel::russh_for_test(41011, true, None);
+    let stale = TunnelLease {
+        key: key.to_string(),
+        generation: old.generation,
+    };
+    cache(key, old.clone());
+
+    assert!(discard_ssh_tunnel(&stale));
+    assert!(!old.is_alive());
+    assert_eq!(cached_port(key), None);
+    assert!(!discard_ssh_tunnel(&stale), "a second discard is a no-op");
+
+    let fresh = crate::ssh_tunnel::SshTunnel::russh_for_test(41012, true, None);
+    assert!(fresh.generation > stale.generation);
+    cache(key, fresh.clone());
+    let replaced = discard_ssh_tunnel(&stale);
+    let cached = cached_port(key);
+    forget(key);
+    assert!(!replaced);
+    assert!(fresh.is_alive());
+    assert_eq!(cached, Some(41012));
+}
