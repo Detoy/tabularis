@@ -26,7 +26,7 @@ on:
 
 jobs:
   test-postgres:
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
 
     services:
       postgres:
@@ -38,6 +38,7 @@ jobs:
           POSTGRES_PASSWORD: password
           POSTGRES_DB: testdb
         options: >-
+          --volume /tmp/tabularis-pg-socket:/var/run/postgresql
           --health-cmd pg_isready
           --health-interval 10s
           --health-timeout 5s
@@ -72,12 +73,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev build-essential libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
 
+      - name: Prepare Tauri frontend resource directory
+        run: mkdir -p packages/web-ui/dist
+
       - name: Run PostgreSQL integration tests
         working-directory: src-tauri
         env:
           RUST_TEST_THREADS: "1"
           REGENERATE_GOLDEN: ${{ (github.event_name == 'workflow_dispatch' && inputs.regenerate_golden) && '1' || '' }}
         run: cargo test --test postgres_integration -- --include-ignored
+
+      - name: Verify PostgreSQL socket and TCP TLS settings
+        working-directory: src-tauri
+        env:
+          PG_UNIX_SOCKET: /tmp/tabularis-pg-socket/.s.PGSQL.5432
+        run: cargo test --test socket_integration postgres_socket_tls_and_tcp_regression -- --ignored --exact
 
       - name: Upload golden files
         if: github.event_name == 'workflow_dispatch' && inputs.regenerate_golden

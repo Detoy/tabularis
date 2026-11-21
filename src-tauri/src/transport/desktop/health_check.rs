@@ -1,0 +1,313 @@
+use crate::application::connection_health::{is_builtin_driver, ping_resolved, reconnect};
+use crate::application::connection_lifecycle::{
+    auto_reconnect_for_tick, plan_tick, ConnectionLifecycle, ConnectionLifecycleEvent,
+    HealthTracker, PingOutcome, TickPing, CONNECTION_LIFECYCLE_EVENT, POOL_CLOSE_TIMEOUT,
+    RECONNECT_TIMEOUT,
+};
+use crate::application::tunnels::{discard_ssh_tunnel, ssh_tunnel_lease, TunnelLease};
+pub(crate) use crate::health_check::*;
+use std::time::{Duration, SystemTime};
+use tauri::Emitter;
+use tokio::sync::oneshot;
+
+/// Broadcast the current active-connection set to all windows.
+pub async fn emit_active_changed<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    let ids = active_connections().await;
+    if let Err(e) = app.emit(ACTIVE_CONNECTIONS_CHANGED_EVENT, ids) {
+        log::error!(
+            "Health check: failed to emit {} event: {}",
+            ACTIVE_CONNECTIONS_CHANGED_EVENT,
+            e
+        );
+    }
+}
+
+/// Start the periodic ping loop. If a loop is already running it is stopped first.
+pub async fn start_ping_loop(app: tauri::AppHandle, interval_secs: u64) {
+    // Stop any existing loop
+    stop_ping_loop().await;
+
+    if interval_secs == 0 {
+        log::info!("Health check: disabled (interval = 0)");
+        return;
+    }
+
+    let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
+    {
+        let mut guard = PING_STOP_TX.lock().await;
+        *guard = Some(stop_tx);
+    }
+
+    log::info!(
+        "Health check: starting ping loop with interval {}s",
+        interval_secs
+    );
+
+    tokio::spawn(async move {
+        let period = Duration::from_secs(interval_secs);
+        let mut interval = tokio::time::interval(period);
+        // The default `Burst` fires every missed tick back to back after a
+        // suspend, which counted two failures before the network was back.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut tracker = HealthTracker::new(period);
+
+        loop {
+            tokio::select! {
+                _ = &mut stop_rx => {
+                    log::info!("Health check: ping loop stopped");
+                    break;
+                }
+                _ = interval.tick() => {
+                    if tracker.begin_tick(SystemTime::now()) {
+                        log::info!("Health check: resumed after a long gap, re-checking connections");
+                    }
+                    ping_all_connections(&app, &mut tracker).await;
+                    tracker.end_tick(SystemTime::now());
+                }
+            }
+        }
+    });
+}
+
+/// Restart the ping loop with a new interval.
+pub async fn restart_ping_loop(app: tauri::AppHandle, interval_secs: u64) {
+    stop_ping_loop().await;
+    start_ping_loop(app, interval_secs).await;
+}
+
+/// Ping every registered connection. A connection that fails the threshold
+/// gets one reconnect attempt when auto-reconnect is on, and is dropped
+/// otherwise. A shared SSH tunnel that looks half-open is stopped first, and
+/// every connection on it is handled as failed.
+async fn ping_all_connections(app: &tauri::AppHandle, tracker: &mut HealthTracker) {
+    // Snapshot the active set so we don't hold the lock during I/O.
+    let active: Vec<String> = ACTIVE_CONNECTIONS.read().await.iter().cloned().collect();
+
+    if active.is_empty() {
+        return;
+    }
+
+    // Ping each connection concurrently.
+    let results = futures::future::join_all(active.iter().map(|conn_id| {
+        let app = app.clone();
+        let conn_id = conn_id.clone();
+        async move {
+            let (lease, outcome) = ping_single_connection(&app, &conn_id).await;
+            (conn_id, lease, outcome)
+        }
+    }))
+    .await;
+
+    let tick: Vec<TickPing> = results
+        .into_iter()
+        .map(|(connection_id, lease, outcome)| TickPing {
+            verdict: tracker.record(&connection_id, outcome == PingOutcome::Ok),
+            connection_id,
+            lease,
+            outcome,
+        })
+        .collect();
+
+    let auto_reconnect = auto_reconnect_for_tick(&tick, || {
+        crate::transport::desktop::config::load_config_internal(app)
+            .auto_reconnect
+            .unwrap_or(false)
+    });
+    let plan = plan_tick(tick, auto_reconnect, tracker);
+    for discard in &plan.discards {
+        if discard_ssh_tunnel(&discard.lease) {
+            log::warn!(
+                "Health check: discarding half-open SSH tunnel (generation {}), {} connections affected",
+                discard.lease.generation,
+                discard.recover.len()
+            );
+        }
+    }
+
+    for failed in plan.failed {
+        let conn_id = failed.connection_id;
+        if !failed.recover {
+            log::error!("Health check: connection {} failed, disconnecting", conn_id);
+            handle_connection_failure(app, &conn_id, &failed.error).await;
+            continue;
+        }
+        recover_connection(app, &conn_id).await;
+    }
+}
+
+/// Replace the pools of a failed connection and test it once, within
+/// `RECONNECT_TIMEOUT`. Released tab sessions are not replayed: a statement
+/// may already have run on the server.
+async fn recover_connection(app: &tauri::AppHandle, connection_id: &str) {
+    log::warn!(
+        "Health check: connection {} failed, reconnecting once",
+        connection_id
+    );
+    emit_lifecycle(app, connection_id, ConnectionLifecycle::Reconnecting);
+
+    let recovery = async {
+        let (_, params) = resolve_params(app, connection_id).await?;
+        // Plugin drivers own their connections and are not rebuilt here, so
+        // their sessions stay pinned and the attempt is one more ping.
+        let released_sessions = if is_builtin_driver(&params.driver) {
+            close_connection_resources(app, connection_id).await
+        } else {
+            0
+        };
+        reconnect(&params, connection_id).await?;
+        Ok(released_sessions)
+    };
+    let attempt = tokio::time::timeout(RECONNECT_TIMEOUT, recovery)
+        .await
+        .unwrap_or_else(|_| Err("Reconnect timed out".to_string()));
+
+    match attempt {
+        Ok(_) if !ACTIVE_CONNECTIONS.read().await.contains(connection_id) => {
+            close_connection_resources(app, connection_id).await;
+        }
+        Ok(released_sessions) => {
+            log::info!("Health check: connection {} reconnected", connection_id);
+            emit_lifecycle(
+                app,
+                connection_id,
+                ConnectionLifecycle::Reconnected { released_sessions },
+            );
+        }
+        Err(err) => {
+            log::error!(
+                "Health check: reconnect failed for {}: {}",
+                connection_id,
+                err
+            );
+            handle_connection_failure(app, connection_id, &err).await;
+        }
+    }
+}
+
+fn emit_lifecycle(app: &tauri::AppHandle, connection_id: &str, lifecycle: ConnectionLifecycle) {
+    let event = ConnectionLifecycleEvent {
+        connection_id: connection_id.to_string(),
+        lifecycle,
+    };
+    if let Err(e) = app.emit(CONNECTION_LIFECYCLE_EVENT, event) {
+        log::error!(
+            "Health check: failed to emit {} event: {}",
+            CONNECTION_LIFECYCLE_EVENT,
+            e
+        );
+    }
+}
+
+/// The connection's params pointing at its tunnel, and the SSH tunnel cached
+/// for it before resolving. Opening a tunnel blocks, so it runs off the async
+/// workers where the callers' timeouts can bound it.
+async fn resolve_params(
+    app: &tauri::AppHandle,
+    connection_id: &str,
+) -> Result<(Option<TunnelLease>, crate::models::ConnectionParams), String> {
+    let saved_conn =
+        crate::transport::desktop::commands::find_connection_by_id(app, connection_id)?;
+
+    let expanded_params =
+        crate::transport::desktop::commands::expand_ssh_connection_params(app, &saved_conn.params)
+            .await?;
+    let mut expanded_params =
+        crate::transport::desktop::commands::expand_k8s_connection_params(app, &expanded_params)
+            .await?;
+    expanded_params.connection_id = Some(connection_id.to_string());
+    let lease = ssh_tunnel_lease(&expanded_params);
+    let params = tokio::task::spawn_blocking(move || {
+        crate::commands::resolve_connection_params(&expanded_params)
+    })
+    .await
+    .map_err(|e| format!("Resolving connection params failed: {e}"))??;
+    Ok((lease, params))
+}
+
+/// Ping a single connection through its existing pool. Also returns the SSH
+/// tunnel that was cached for it when the ping started.
+async fn ping_single_connection(
+    app: &tauri::AppHandle,
+    connection_id: &str,
+) -> (Option<TunnelLease>, PingOutcome) {
+    let (lease, params) = match resolve_params(app, connection_id).await {
+        Ok(resolved) => resolved,
+        Err(err) => return (None, PingOutcome::Error(err)),
+    };
+
+    let outcome = ping_resolved(&params, connection_id).await;
+    (lease, outcome)
+}
+
+/// Unregister the connection, close its pools, and emit a failure event.
+async fn handle_connection_failure(app: &tauri::AppHandle, connection_id: &str, error: &str) {
+    // Unregister first to prevent further pings.
+    unregister_connection(connection_id).await;
+    close_connection_resources(app, connection_id).await;
+
+    // Notify frontend.
+    let payload = serde_json::json!({
+        "connectionId": connection_id,
+        "error": error,
+    });
+    if let Err(e) = app.emit("connection-health-failed", payload) {
+        log::error!(
+            "Health check: failed to emit connection-health-failed event: {}",
+            e
+        );
+    }
+
+    // Broadcast the updated active-connection set so every window reconciles.
+    emit_active_changed(app).await;
+}
+
+/// Release the connection's pinned tab sessions, then close all its pools.
+/// Returns how many sessions were released.
+///
+/// Sessions go first because a pinned session holds a checked-out connection,
+/// and `sqlx::Pool::close` waits for checked-out connections. The pool close
+/// is bounded by `POOL_CLOSE_TIMEOUT` for connections still held by queries on
+/// a dead link.
+async fn close_connection_resources(app: &tauri::AppHandle, connection_id: &str) -> usize {
+    // release_connection_sessions only looks up the driver for rollback, so it
+    // needs no tunnel expansion. A dead bastion / unreachable cluster must not
+    // prevent cleanup (#1065).
+    let saved_conn =
+        crate::transport::desktop::commands::find_connection_by_id(app, connection_id).ok();
+    let close_params = saved_conn.as_ref().map(|saved_conn| {
+        crate::commands::params_for_pool_close(&saved_conn.params, connection_id).unwrap_or_else(
+            |e| {
+                log::warn!(
+                    "Health check: failed to resolve tunnel-free params for session release on {connection_id}: {e}"
+                );
+                let mut fallback = saved_conn.params.clone();
+                fallback.connection_id = Some(connection_id.to_string());
+                fallback
+            },
+        )
+    });
+    let released = crate::transport::desktop::commands::release_connection_sessions(
+        app,
+        connection_id,
+        close_params.as_ref(),
+    )
+    .await;
+
+    // Pool keys depend only on connection_id (plus driver/database/TLS), not
+    // the tunnel's local port, so this closes per-database override pools too
+    // (#1063).
+    if let Some(saved_conn) = saved_conn {
+        let closed = crate::pool_manager::close_pools_for_connection_id_within(
+            &saved_conn.params.driver,
+            connection_id,
+            POOL_CLOSE_TIMEOUT,
+        )
+        .await;
+        if !closed {
+            log::warn!(
+                "Health check: pools for {connection_id} are still closing; a checked-out connection has not been returned"
+            );
+        }
+    }
+    released
+}

@@ -5,7 +5,14 @@
 /// on this to route commented-header SELECTs through the pagination
 /// path.
 pub fn is_select_query(query: &str) -> bool {
-    strip_leading_sql_comments(query)
+    is_select_query_for(query, false)
+}
+
+/// [`is_select_query`] for a driver whose resolved syntax has `#` line
+/// comments (`hash_comments`). Must use the same flag as
+/// [`returns_result_set_for`] so `# note\nSELECT 1` is paginated too.
+pub fn is_select_query_for(query: &str, hash_comments: bool) -> bool {
+    strip_leading_sql_comments_for(query, hash_comments)
         .trim_start()
         .to_uppercase()
         .starts_with("SELECT")
@@ -13,11 +20,22 @@ pub fn is_select_query(query: &str) -> bool {
 
 /// Strip leading SQL comments (`-- …` line comments and `/* … */` block
 /// comments) and whitespace so the first statement keyword is at position 0.
+///
+/// A leading `#` is kept: it is code (or an error) outside MySQL-like
+/// syntaxes. Drivers whose resolved syntax has `#` comments use
+/// [`strip_leading_sql_comments_for`].
 pub fn strip_leading_sql_comments(query: &str) -> &str {
+    strip_leading_sql_comments_for(query, false)
+}
+
+/// [`strip_leading_sql_comments`] that also strips `# …` line comments when
+/// `hash_comments` is set (the driver's resolved `SqlSyntax::hash_comments`,
+/// e.g. MySQL / MariaDB).
+pub fn strip_leading_sql_comments_for(query: &str, hash_comments: bool) -> &str {
     let mut s = query;
     loop {
         s = s.trim_start();
-        if s.starts_with("--") {
+        if s.starts_with("--") || (hash_comments && s.starts_with('#')) {
             match s.find('\n') {
                 Some(pos) => s = &s[pos + 1..],
                 None => return "",
@@ -46,7 +64,13 @@ pub fn strip_leading_sql_comments(query: &str) -> &str {
 /// lesser evil compared to misclassifying procedures that do return
 /// rows.
 pub fn returns_result_set(query: &str) -> bool {
-    let head = strip_leading_sql_comments(query)
+    returns_result_set_for(query, false)
+}
+
+/// [`returns_result_set`] for a driver whose resolved syntax has `#` line
+/// comments (`hash_comments`), so `# note\nSELECT 1` still fetches rows.
+pub fn returns_result_set_for(query: &str, hash_comments: bool) -> bool {
+    let head = strip_leading_sql_comments_for(query, hash_comments)
         .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
         .next()
         .unwrap_or("")
@@ -75,10 +99,16 @@ pub fn returns_result_set(query: &str) -> bool {
 /// Leading SQL comments are stripped before checking.
 ///
 /// Kept in sync with the TypeScript classifier in
-/// `src/utils/sqlSplitter/classify.ts` (EXPLAINABLE_KEYWORDS) so the
+/// `packages/web-ui/src/utils/sqlSplitter/classify.ts` (EXPLAINABLE_KEYWORDS) so the
 /// editor's Explain UI cannot offer a statement the backend will refuse.
 pub fn is_explainable_query(query: &str) -> bool {
-    let upper = strip_leading_sql_comments(query).to_uppercase();
+    is_explainable_query_for(query, false)
+}
+
+/// [`is_explainable_query`] for a driver whose resolved syntax has `#` line
+/// comments (`hash_comments`), so `# note\nSELECT 1` can be explained.
+pub fn is_explainable_query_for(query: &str, hash_comments: bool) -> bool {
+    let upper = strip_leading_sql_comments_for(query, hash_comments).to_uppercase();
     upper.starts_with("SELECT")
         || upper.starts_with("INSERT")
         || upper.starts_with("UPDATE")
@@ -210,6 +240,119 @@ fn tokenize_sql_with_pos(sql: &str) -> Vec<(String, usize)> {
     tokens
 }
 
+/// A trailing `LIMIT <offset>, <count>`, the form MySQL and SQLite also accept,
+/// with any spacing around the comma. Returns the index of the `LIMIT` token,
+/// the offset and the row count.
+fn trailing_comma_limit(tokens: &[(String, usize)]) -> Option<(usize, u64, u64)> {
+    let limit_index = tokens
+        .iter()
+        .rposition(|(token, _)| token.eq_ignore_ascii_case("LIMIT"))?;
+    let tail = &tokens[limit_index + 1..];
+    if tail.is_empty() || tail.len() > 3 {
+        return None;
+    }
+    let joined: String = tail.iter().map(|(token, _)| token.as_str()).collect();
+    let (offset, count) = joined.split_once(',')?;
+    Some((limit_index, offset.parse().ok()?, count.parse().ok()?))
+}
+
+/// The row-limiting clauses at the end of a query.
+struct TrailingRowLimit {
+    /// Index of the token that starts the first clause.
+    start: usize,
+    /// Row count, or `None` for no clause or `LIMIT ALL`.
+    limit: Option<u64>,
+    /// Rows to skip, or `None` for no clause.
+    offset: Option<u64>,
+}
+
+/// One row-limiting clause ending just before token `end`.
+enum RowLimitClause {
+    /// `LIMIT <n>`, `LIMIT ALL`, or `FETCH { FIRST | NEXT } [<n>] { ROW | ROWS } ONLY`.
+    Limit(Option<u64>),
+    /// `OFFSET <n>` or `OFFSET <n> { ROW | ROWS }`.
+    Offset(u64),
+}
+
+fn row_limit_clause_before(
+    tokens: &[(String, usize)],
+    end: usize,
+) -> Option<(usize, RowLimitClause)> {
+    let word = |index: usize| tokens[index].0.as_str();
+    let is = |index: usize, keyword: &str| word(index).eq_ignore_ascii_case(keyword);
+    let is_row = |index: usize| is(index, "ROW") || is(index, "ROWS");
+    let number = |index: usize| word(index).parse::<u64>().ok();
+
+    // LIMIT <n> | LIMIT ALL
+    if end >= 2 && is(end - 2, "LIMIT") {
+        if is(end - 1, "ALL") {
+            return Some((end - 2, RowLimitClause::Limit(None)));
+        }
+        if let Some(count) = number(end - 1) {
+            return Some((end - 2, RowLimitClause::Limit(Some(count))));
+        }
+    }
+    // OFFSET <n> [ROW | ROWS]
+    let offset_end = if end >= 1 && is_row(end - 1) {
+        end - 1
+    } else {
+        end
+    };
+    if offset_end >= 2 && is(offset_end - 2, "OFFSET") {
+        if let Some(offset) = number(offset_end - 1) {
+            return Some((offset_end - 2, RowLimitClause::Offset(offset)));
+        }
+    }
+    // FETCH { FIRST | NEXT } [<n>] { ROW | ROWS } ONLY
+    if end >= 4 && is(end - 1, "ONLY") && is_row(end - 2) {
+        let (count, first_index) = match number(end - 3) {
+            Some(count) => (count, end - 4),
+            None => (1, end - 3),
+        };
+        if first_index >= 1
+            && (is(first_index, "FIRST") || is(first_index, "NEXT"))
+            && is(first_index - 1, "FETCH")
+        {
+            return Some((first_index - 1, RowLimitClause::Limit(Some(count))));
+        }
+    }
+    None
+}
+
+/// Finds the row-limiting clauses that end the query: `LIMIT <offset>, <count>`,
+/// or a limit and an offset clause in either order, as PostgreSQL accepts them
+/// (`LIMIT 5 OFFSET 10`, `OFFSET 10 LIMIT 5`, `LIMIT ALL`,
+/// `OFFSET 10 ROWS FETCH FIRST 5 ROWS ONLY`).
+fn trailing_row_limit(tokens: &[(String, usize)]) -> Option<TrailingRowLimit> {
+    if let Some((start, offset, count)) = trailing_comma_limit(tokens) {
+        return Some(TrailingRowLimit {
+            start,
+            limit: Some(count),
+            offset: Some(offset),
+        });
+    }
+    let mut start = tokens.len();
+    let mut limit = None;
+    let mut offset = None;
+    let mut found_limit = false;
+    while let Some((clause_start, clause)) = row_limit_clause_before(tokens, start) {
+        match clause {
+            RowLimitClause::Limit(count) if !found_limit => {
+                found_limit = true;
+                limit = count;
+            }
+            RowLimitClause::Offset(rows) if offset.is_none() => offset = Some(rows),
+            _ => break,
+        }
+        start = clause_start;
+    }
+    (start < tokens.len()).then_some(TrailingRowLimit {
+        start,
+        limit,
+        offset,
+    })
+}
+
 /// Remove trailing LIMIT and OFFSET clauses from a SQL query.
 ///
 /// Returns a substring of the original input so leading comments and
@@ -220,68 +363,30 @@ fn tokenize_sql_with_pos(sql: &str) -> Vec<(String, usize)> {
 pub fn strip_limit_offset(query: &str) -> String {
     let trimmed = query.trim_end();
     let tokens = tokenize_sql_with_pos(trimmed);
-    let mut end = tokens.len();
-
-    if end >= 2
-        && tokens[end - 2].0.to_uppercase() == "OFFSET"
-        && tokens[end - 1].0.parse::<u64>().is_ok()
-    {
-        end -= 2;
+    match trailing_row_limit(&tokens) {
+        Some(row_limit) => trimmed[..tokens[row_limit.start].1].trim_end().to_string(),
+        None => trimmed.to_string(),
     }
-
-    if end >= 2
-        && tokens[end - 2].0.to_uppercase() == "LIMIT"
-        && tokens[end - 1].0.parse::<u64>().is_ok()
-    {
-        end -= 2;
-    }
-
-    if end == tokens.len() {
-        return trimmed.to_string();
-    }
-
-    let cut = tokens[end].1;
-    trimmed[..cut].trim_end().to_string()
 }
 
-/// Extract the numeric value from a trailing LIMIT clause, if present.
+/// Extract the row count from the trailing LIMIT (or FETCH FIRST) clause, if
+/// present.
 ///
 /// Uses a token-aware scan so that `LIMIT` as a substring of a table name
 /// (e.g. `tapp_appointment_message_event_limit`) is never misidentified.
 pub fn extract_user_limit(query: &str) -> Option<u32> {
     let tokens = tokenize_sql_with_pos(query.trim());
-    let len = tokens.len();
-
-    let mut end = len;
-    if end >= 2
-        && tokens[end - 2].0.to_uppercase() == "OFFSET"
-        && tokens[end - 1].0.parse::<u64>().is_ok()
-    {
-        end -= 2;
-    }
-
-    if end >= 2 && tokens[end - 2].0.to_uppercase() == "LIMIT" {
-        return tokens[end - 1].0.parse().ok();
-    }
-
-    None
+    trailing_row_limit(&tokens)?.limit?.try_into().ok()
 }
 
 /// Extract the numeric value from a trailing OFFSET clause, if present.
 ///
-/// Mirrors [`extract_user_limit`] and only recognises the `… OFFSET <n>`
-/// shape that [`strip_limit_offset`] removes (the common `LIMIT x OFFSET y`
-/// ordering). Uses a token-aware scan so `OFFSET` inside an identifier or
-/// string literal is never misidentified.
+/// Mirrors [`extract_user_limit`] and recognises the same clauses that
+/// [`strip_limit_offset`] removes. Uses a token-aware scan so `OFFSET` inside
+/// an identifier or string literal is never misidentified.
 pub fn extract_user_offset(query: &str) -> Option<u32> {
     let tokens = tokenize_sql_with_pos(query.trim());
-    let end = tokens.len();
-
-    if end >= 2 && tokens[end - 2].0.to_uppercase() == "OFFSET" {
-        return tokens[end - 1].0.parse().ok();
-    }
-
-    None
+    trailing_row_limit(&tokens)?.offset?.try_into().ok()
 }
 
 /// Build a paginated query by stripping any user-supplied LIMIT/OFFSET and
@@ -296,15 +401,34 @@ pub fn extract_user_offset(query: &str) -> Option<u32> {
 /// set the user actually asked for (the rows after their OFFSET). Discarding it
 /// silently collapsed `LIMIT 1 OFFSET 1` to `LIMIT 1 OFFSET 0` on page 1.
 pub fn build_paginated_query(query: &str, page_size: u32, page: u32) -> String {
+    build_paginated_query_for(query, page_size, page, true, true)
+}
+
+/// [`build_paginated_query`] parameterized by the driver's comment syntax:
+/// `hash_comments` treats `# …` as a line comment (MySQL/MariaDB only; in
+/// PostgreSQL `#`, `#>`, `#>>`, `#-` are operators), and
+/// `line_comment_requires_space` requires whitespace or EOF after `--`
+/// (MySQL/MariaDB only; PostgreSQL and SQLite accept `--note`).
+pub fn build_paginated_query_for(
+    query: &str,
+    page_size: u32,
+    page: u32,
+    hash_comments: bool,
+    line_comment_requires_space: bool,
+) -> String {
     let page_offset = calculate_offset(page, page_size);
-    let normalized = trim_trailing_statement_terminator(query);
-    let clause_source = match trailing_comment_start(normalized) {
-        Some(comment_start) => normalized[..comment_start].trim_end(),
-        None => normalized,
-    };
+    let normalized =
+        trim_trailing_statement_terminator(query, hash_comments, line_comment_requires_space);
+    let clause_source =
+        match trailing_comment_start(normalized, hash_comments, line_comment_requires_space) {
+            Some(comment_start) => normalized[..comment_start].trim_end(),
+            None => normalized,
+        };
     let user_limit = extract_user_limit(clause_source);
     let user_offset = extract_user_offset(clause_source).unwrap_or(0);
-    let base_source = if user_limit.is_some() || user_offset > 0 {
+    // Cut at the clauses even when they set nothing (`LIMIT ALL`, `OFFSET 0`).
+    let has_row_limit = trailing_row_limit(&tokenize_sql_with_pos(clause_source)).is_some();
+    let base_source = if has_row_limit {
         clause_source
     } else {
         normalized
@@ -322,16 +446,24 @@ pub fn build_paginated_query(query: &str, page_size: u32, page: u32) -> String {
 
     let offset = user_offset.saturating_add(page_offset);
 
-    let separator = if trailing_comment_start(&base).is_some() {
-        "\n"
-    } else {
-        " "
-    };
+    let separator =
+        if trailing_comment_start(&base, hash_comments, line_comment_requires_space).is_some() {
+            "\n"
+        } else {
+            " "
+        };
 
-    format!("{}{}LIMIT {} OFFSET {}", base, separator, fetch_count, offset)
+    format!(
+        "{}{}LIMIT {} OFFSET {}",
+        base, separator, fetch_count, offset
+    )
 }
 
-fn trim_trailing_statement_terminator(query: &str) -> &str {
+fn trim_trailing_statement_terminator(
+    query: &str,
+    hash_comments: bool,
+    line_comment_requires_space: bool,
+) -> &str {
     let original_end = query.trim_end().len();
     let mut end = query.len();
 
@@ -339,7 +471,9 @@ fn trim_trailing_statement_terminator(query: &str) -> &str {
         let trimmed = query[..end].trim_end();
         end = trimmed.len();
 
-        if let Some(comment_start) = trailing_comment_start(trimmed) {
+        if let Some(comment_start) =
+            trailing_comment_start(trimmed, hash_comments, line_comment_requires_space)
+        {
             end = comment_start;
             continue;
         }
@@ -354,7 +488,11 @@ fn trim_trailing_statement_terminator(query: &str) -> &str {
     }
 }
 
-fn trailing_comment_start(sql: &str) -> Option<usize> {
+fn trailing_comment_start(
+    sql: &str,
+    hash_comments: bool,
+    line_comment_requires_space: bool,
+) -> Option<usize> {
     #[derive(Clone, Copy)]
     enum State {
         Normal,
@@ -383,7 +521,9 @@ fn trailing_comment_start(sql: &str) -> Option<usize> {
                 if ch == '-'
                     && i + 1 < chars.len()
                     && chars[i + 1].1 == '-'
-                    && (i + 2 >= chars.len() || chars[i + 2].1.is_whitespace())
+                    && (!line_comment_requires_space
+                        || i + 2 >= chars.len()
+                        || chars[i + 2].1.is_whitespace())
                 {
                     candidate.get_or_insert(byte);
                     state = State::LineComment;
@@ -391,7 +531,7 @@ fn trailing_comment_start(sql: &str) -> Option<usize> {
                     continue;
                 }
 
-                if ch == '#' {
+                if hash_comments && ch == '#' {
                     candidate.get_or_insert(byte);
                     state = State::HashComment;
                     i += 1;
@@ -421,10 +561,7 @@ fn trailing_comment_start(sql: &str) -> Option<usize> {
                     State::Backtick => '`',
                     _ => unreachable!(),
                 };
-                if !matches!(state, State::Backtick)
-                    && ch == '\\'
-                    && i + 1 < chars.len()
-                {
+                if !matches!(state, State::Backtick) && ch == '\\' && i + 1 < chars.len() {
                     i += 2;
                 } else if ch == quote {
                     if i + 1 < chars.len() && chars[i + 1].1 == quote {
@@ -509,7 +646,10 @@ pub fn transaction_effect(query: &str) -> TransactionEffect {
     let mut rest: Vec<String> = words.collect();
     // `WORK` / `TRANSACTION` after a transaction-control verb is optional noise.
     if matches!(first.as_str(), "COMMIT" | "END" | "ROLLBACK" | "ABORT")
-        && matches!(rest.first().map(String::as_str), Some("WORK" | "TRANSACTION"))
+        && matches!(
+            rest.first().map(String::as_str),
+            Some("WORK" | "TRANSACTION")
+        )
     {
         rest.remove(0);
     }
@@ -581,4 +721,29 @@ fn leading_keywords(query: &str, n: usize) -> Vec<String> {
         words.push(word);
     }
     words
+}
+
+/// Calculates `(server_time_ms, fetch_time_ms)` from the total elapsed time and
+/// the optional elapsed time until the first row was received.
+///
+/// If no rows were received (`first_row_elapsed_ms` is `None`), server execution
+/// time equals the total elapsed time, and fetch time is 0.0.
+pub fn calculate_query_timing(
+    total_elapsed_ms: f64,
+    first_row_elapsed_ms: Option<f64>,
+) -> (Option<f64>, Option<f64>) {
+    match first_row_elapsed_ms {
+        Some(s_ms) => (Some(s_ms), Some((total_elapsed_ms - s_ms).max(0.0))),
+        None => (Some(total_elapsed_ms), Some(0.0)),
+    }
+}
+
+/// Computes query timing given a `start_instant` and the optional
+/// first-row arrival time.
+pub fn calculate_query_timing_from_start(
+    start_instant: std::time::Instant,
+    first_row_elapsed_ms: Option<f64>,
+) -> (Option<f64>, Option<f64>) {
+    let total_elapsed_ms = start_instant.elapsed().as_secs_f64() * 1000.0;
+    calculate_query_timing(total_elapsed_ms, first_row_elapsed_ms)
 }

@@ -1,6 +1,9 @@
 use super::{
-    build_paginated_query, decode_blob_wire_format, encode_blob, encode_blob_full, i64_to_json,
-    is_explainable_query, is_select_query, parse_unsafe_bigint_string, strip_leading_sql_comments,
+    build_paginated_query, build_paginated_query_for, calculate_query_timing,
+    calculate_query_timing_from_start, decode_blob_wire_format, encode_blob, encode_blob_full,
+    full_type_if_distinct, i64_to_json, is_explainable_query, is_explainable_query_for,
+    is_select_query, is_select_query_for, parse_unsafe_bigint_string, returns_result_set,
+    returns_result_set_for, strip_leading_sql_comments, strip_leading_sql_comments_for,
     strip_limit_offset, transaction_effect, u64_to_json, TransactionEffect, DEFAULT_MAX_BLOB_SIZE,
     JS_MAX_SAFE_INTEGER, JS_MAX_SAFE_UINT, MAX_BLOB_PREVIEW_SIZE,
 };
@@ -86,6 +89,45 @@ fn test_strip_leading_sql_comments_no_comments() {
 }
 
 #[test]
+fn test_strip_leading_sql_comments_keeps_hash_without_hash_comments() {
+    assert_eq!(
+        strip_leading_sql_comments("# note\nSELECT 1"),
+        "# note\nSELECT 1"
+    );
+    assert!(!returns_result_set("# note\nSELECT 1"));
+}
+
+#[test]
+fn test_strip_leading_sql_comments_for_hash_comments() {
+    assert_eq!(
+        strip_leading_sql_comments_for("# note\n-- x\n#y\n/* z */ SELECT 1", true),
+        "SELECT 1"
+    );
+    assert_eq!(strip_leading_sql_comments_for("# only comment", true), "");
+    // Without hash comments the `#` line stays, exactly as before.
+    assert_eq!(
+        strip_leading_sql_comments_for("# note\nSELECT 1", false),
+        strip_leading_sql_comments("# note\nSELECT 1")
+    );
+}
+
+#[test]
+fn test_returns_result_set_for_hash_comments() {
+    assert!(returns_result_set_for("# note\nSELECT 1", true));
+    assert!(returns_result_set_for("#a\n# b\nSHOW TABLES", true));
+    assert!(!returns_result_set_for(
+        "# note\nINSERT INTO t VALUES (1)",
+        true
+    ));
+    assert!(!returns_result_set_for("# note\nSELECT 1", false));
+    // MySQL's resolved syntax has hash comments; PostgreSQL's does not.
+    use crate::drivers::driver_trait::SqlDialect;
+    use crate::drivers::sql_syntax::SqlSyntax;
+    assert!(SqlSyntax::preset(Some(SqlDialect::Mysql)).hash_comments);
+    assert!(!SqlSyntax::preset(Some(SqlDialect::Postgres)).hash_comments);
+}
+
+#[test]
 fn test_strip_leading_sql_comments_unterminated() {
     assert_eq!(strip_leading_sql_comments("-- only comment"), "");
     assert_eq!(strip_leading_sql_comments("/* never closed"), "");
@@ -166,6 +208,25 @@ fn test_is_select_query_with_leading_comments() {
 }
 
 #[test]
+fn test_is_select_query_for_hash_comments() {
+    assert!(is_select_query_for("# note\nSELECT * FROM users", true));
+    assert!(is_select_query_for("# a\n-- b\n/* c */ SELECT 1", true));
+    assert!(!is_select_query_for("# note\nUPDATE users SET a = 1", true));
+    // Without hash comments a leading `#` is code, not a comment.
+    assert!(!is_select_query_for("# note\nSELECT 1", false));
+    assert!(!is_select_query("# note\nSELECT 1"));
+}
+
+#[test]
+fn test_is_explainable_query_for_hash_comments() {
+    assert!(is_explainable_query_for("# note\nSELECT 1", true));
+    assert!(is_explainable_query_for("# note\nDELETE FROM t", true));
+    assert!(!is_explainable_query_for("# note\nDROP TABLE t", true));
+    assert!(!is_explainable_query_for("# note\nSELECT 1", false));
+    assert!(!is_explainable_query("# note\nSELECT 1"));
+}
+
+#[test]
 fn test_calculate_offset() {
     assert_eq!(super::calculate_offset(1, 100), 0);
     assert_eq!(super::calculate_offset(2, 100), 100);
@@ -216,7 +277,9 @@ fn test_strip_limit_offset_table_name_contains_limit() {
 #[test]
 fn test_strip_limit_offset_table_name_contains_limit_with_real_limit() {
     assert_eq!(
-        strip_limit_offset("SELECT * FROM tapp_appointment_message_event_limit ORDER BY id LIMIT 10"),
+        strip_limit_offset(
+            "SELECT * FROM tapp_appointment_message_event_limit ORDER BY id LIMIT 10"
+        ),
         "SELECT * FROM tapp_appointment_message_event_limit ORDER BY id"
     );
 }
@@ -385,7 +448,10 @@ fn test_build_paginated_query_honors_user_limit_offset_before_trailing_comment()
 fn test_build_paginated_query_honors_user_limit_after_backslash_quoted_string() {
     let q = r"SELECT 'it\'s LIMIT 5' AS label FROM t LIMIT 50 -- cap";
     let result = build_paginated_query(q, 100, 1);
-    assert_eq!(result, r"SELECT 'it\'s LIMIT 5' AS label FROM t LIMIT 50 OFFSET 0");
+    assert_eq!(
+        result,
+        r"SELECT 'it\'s LIMIT 5' AS label FROM t LIMIT 50 OFFSET 0"
+    );
 }
 
 #[test]
@@ -421,6 +487,89 @@ fn test_build_paginated_query_honors_user_limit_offset_before_trailing_semicolon
     let q = "SELECT * FROM t ORDER BY id LIMIT 50 OFFSET 10;";
     let result = build_paginated_query(q, 100, 1);
     assert_eq!(result, "SELECT * FROM t ORDER BY id LIMIT 50 OFFSET 10");
+}
+
+#[test]
+fn test_strip_limit_offset_comma_form() {
+    for q in [
+        "SELECT * FROM t ORDER BY id LIMIT 5, 10",
+        "SELECT * FROM t ORDER BY id LIMIT 5,10",
+        "SELECT * FROM t ORDER BY id LIMIT 5 , 10",
+        "SELECT * FROM t ORDER BY id LIMIT 5 ,10",
+    ] {
+        assert_eq!(strip_limit_offset(q), "SELECT * FROM t ORDER BY id", "{q}");
+    }
+}
+
+#[test]
+fn test_build_paginated_query_honors_comma_form_limit() {
+    // MySQL/SQLite `LIMIT <offset>, <count>`: 10 rows after the first 5.
+    let q = "SELECT * FROM t ORDER BY id LIMIT 5, 10";
+    assert_eq!(
+        build_paginated_query(q, 100, 1),
+        "SELECT * FROM t ORDER BY id LIMIT 10 OFFSET 5"
+    );
+    let q = "SELECT * FROM t ORDER BY id LIMIT 20,250;";
+    assert_eq!(
+        build_paginated_query(q, 100, 2),
+        "SELECT * FROM t ORDER BY id LIMIT 101 OFFSET 120"
+    );
+}
+
+#[test]
+fn test_build_paginated_query_ignores_comma_limit_in_subquery() {
+    let q = "SELECT * FROM (SELECT * FROM t LIMIT 5, 10) s";
+    assert_eq!(
+        build_paginated_query(q, 100, 1),
+        "SELECT * FROM (SELECT * FROM t LIMIT 5, 10) s LIMIT 101 OFFSET 0"
+    );
+}
+
+#[test]
+fn test_build_paginated_query_honors_postgres_row_limit_forms() {
+    // PostgreSQL accepts OFFSET before LIMIT, `LIMIT ALL`, `OFFSET <n> ROWS`
+    // and the standard `FETCH FIRST`; leaving any of them in place next to
+    // the appended LIMIT is a syntax error.
+    for (q, page_1, page_2) in [
+        (
+            "SELECT * FROM t OFFSET 10 LIMIT 5",
+            "SELECT * FROM t LIMIT 5 OFFSET 10",
+            "SELECT * FROM t LIMIT 3 OFFSET 12",
+        ),
+        (
+            "SELECT * FROM t LIMIT ALL",
+            "SELECT * FROM t LIMIT 101 OFFSET 0",
+            "SELECT * FROM t LIMIT 3 OFFSET 2",
+        ),
+        (
+            "SELECT * FROM t LIMIT ALL OFFSET 10",
+            "SELECT * FROM t LIMIT 101 OFFSET 10",
+            "SELECT * FROM t LIMIT 3 OFFSET 12",
+        ),
+        (
+            "SELECT * FROM t OFFSET 10 ROWS",
+            "SELECT * FROM t LIMIT 101 OFFSET 10",
+            "SELECT * FROM t LIMIT 3 OFFSET 12",
+        ),
+        (
+            "SELECT * FROM t ORDER BY id FETCH FIRST 5 ROWS ONLY",
+            "SELECT * FROM t ORDER BY id LIMIT 5 OFFSET 0",
+            "SELECT * FROM t ORDER BY id LIMIT 3 OFFSET 2",
+        ),
+        (
+            "SELECT * FROM t OFFSET 10 ROWS FETCH NEXT 5 ROWS ONLY;",
+            "SELECT * FROM t LIMIT 5 OFFSET 10",
+            "SELECT * FROM t LIMIT 3 OFFSET 12",
+        ),
+        (
+            "select * from t fetch first row only",
+            "select * from t LIMIT 1 OFFSET 0",
+            "select * from t LIMIT 0 OFFSET 2",
+        ),
+    ] {
+        assert_eq!(build_paginated_query(q, 100, 1), page_1, "{q}");
+        assert_eq!(build_paginated_query(q, 2, 2), page_2, "{q}");
+    }
 }
 
 #[test]
@@ -485,10 +634,7 @@ fn test_extract_user_offset_only_offset() {
 
 #[test]
 fn test_extract_user_offset_absent() {
-    assert_eq!(
-        super::extract_user_offset("SELECT * FROM t LIMIT 50"),
-        None
-    );
+    assert_eq!(super::extract_user_offset("SELECT * FROM t LIMIT 50"), None);
 }
 
 #[test]
@@ -548,6 +694,54 @@ fn test_build_paginated_query_multiline_comments_with_user_limit() {
     assert_eq!(
         result,
         "-- ============\n-- title\n-- ============\n\nSELECT * FROM t ORDER BY id LIMIT 50 OFFSET 0"
+    );
+}
+
+#[test]
+fn test_build_paginated_query_for_postgres_keeps_hash_operators_and_strips_semicolon() {
+    let with_limit = "SELECT data #>> '{a}' FROM t LIMIT 5";
+    assert_eq!(
+        build_paginated_query_for(with_limit, 100, 1, false, false),
+        "SELECT data #>> '{a}' FROM t LIMIT 5 OFFSET 0"
+    );
+
+    let with_semicolon = "SELECT data #>> '{a}' FROM t;";
+    assert_eq!(
+        build_paginated_query_for(with_semicolon, 100, 1, false, false),
+        "SELECT data #>> '{a}' FROM t LIMIT 101 OFFSET 0"
+    );
+}
+
+#[test]
+fn test_build_paginated_query_for_postgres_sqlite_handles_unspaced_dash_comments() {
+    let trailing_comment = "SELECT * FROM t --note";
+    assert_eq!(
+        build_paginated_query_for(trailing_comment, 100, 1, false, false),
+        "SELECT * FROM t --note\nLIMIT 101 OFFSET 0"
+    );
+
+    let with_limit = "SELECT * FROM t LIMIT 5 --note";
+    assert_eq!(
+        build_paginated_query_for(with_limit, 100, 1, false, false),
+        "SELECT * FROM t LIMIT 5 OFFSET 0"
+    );
+
+    let with_semicolon = "SELECT * FROM t; --note";
+    assert_eq!(
+        build_paginated_query_for(with_semicolon, 100, 1, false, false),
+        "SELECT * FROM t LIMIT 101 OFFSET 0"
+    );
+}
+
+#[test]
+fn test_build_paginated_query_for_mysql_preserves_hash_and_spaced_dash_comments() {
+    assert_eq!(
+        build_paginated_query_for("SELECT * FROM t # note", 100, 1, true, true),
+        "SELECT * FROM t # note\nLIMIT 101 OFFSET 0"
+    );
+    assert_eq!(
+        build_paginated_query_for("SELECT 1--2;", 1, 1, true, true),
+        "SELECT 1--2 LIMIT 2 OFFSET 0"
     );
 }
 
@@ -701,7 +895,10 @@ fn test_parse_unsafe_bigint_string_returns_outside_safe_range() {
         parse_unsafe_bigint_string("-9007199254740992"),
         Some(-JS_MAX_SAFE_INTEGER - 1)
     );
-    assert_eq!(parse_unsafe_bigint_string(&i64::MAX.to_string()), Some(i64::MAX));
+    assert_eq!(
+        parse_unsafe_bigint_string(&i64::MAX.to_string()),
+        Some(i64::MAX)
+    );
 }
 
 #[test]
@@ -805,15 +1002,32 @@ fn transaction_effect_ignores_savepoint_rollback() {
 
 #[test]
 fn transaction_effect_detects_chained_and_two_phase_statements() {
-    for query in ["COMMIT AND CHAIN", "commit work and chain", "ROLLBACK AND CHAIN", "ABORT AND CHAIN"] {
-        assert_eq!(transaction_effect(query), TransactionEffect::Chains, "{query}");
+    for query in [
+        "COMMIT AND CHAIN",
+        "commit work and chain",
+        "ROLLBACK AND CHAIN",
+        "ABORT AND CHAIN",
+    ] {
+        assert_eq!(
+            transaction_effect(query),
+            TransactionEffect::Chains,
+            "{query}"
+        );
     }
     for query in ["COMMIT AND NO CHAIN", "ABORT", "PREPARE TRANSACTION 'tx1'"] {
-        assert_eq!(transaction_effect(query), TransactionEffect::Closes, "{query}");
+        assert_eq!(
+            transaction_effect(query),
+            TransactionEffect::Closes,
+            "{query}"
+        );
     }
     // Two-phase commit runs outside a transaction block and never touches the session's.
     for query in ["COMMIT PREPARED 'tx1'", "ROLLBACK PREPARED 'tx1'"] {
-        assert_eq!(transaction_effect(query), TransactionEffect::None, "{query}");
+        assert_eq!(
+            transaction_effect(query),
+            TransactionEffect::None,
+            "{query}"
+        );
     }
 }
 
@@ -836,13 +1050,25 @@ fn in_transaction_after_treats_a_failed_commit_as_closing() {
 fn transaction_effect_reads_optional_noise_words_and_inner_comments() {
     for (query, effect) in [
         ("ROLLBACK WORK TO SAVEPOINT sp1", TransactionEffect::None),
-        ("ROLLBACK TRANSACTION TO SAVEPOINT sp1", TransactionEffect::None),
+        (
+            "ROLLBACK TRANSACTION TO SAVEPOINT sp1",
+            TransactionEffect::None,
+        ),
         ("COMMIT WORK", TransactionEffect::Closes),
-        ("COMMIT -- and chain later if needed", TransactionEffect::Closes),
+        (
+            "COMMIT -- and chain later if needed",
+            TransactionEffect::Closes,
+        ),
         ("COMMIT /* and chain */", TransactionEffect::Closes),
         ("START /* explicit */ TRANSACTION", TransactionEffect::Opens),
-        ("COMMIT /* outer /* nested */ still comment */ AND CHAIN", TransactionEffect::Chains),
-        ("ROLLBACK TRANSACTION AND NO CHAIN", TransactionEffect::Closes),
+        (
+            "COMMIT /* outer /* nested */ still comment */ AND CHAIN",
+            TransactionEffect::Chains,
+        ),
+        (
+            "ROLLBACK TRANSACTION AND NO CHAIN",
+            TransactionEffect::Closes,
+        ),
         ("PREPARE TRANSACTION 'and chain'", TransactionEffect::Closes),
     ] {
         assert_eq!(transaction_effect(query), effect, "{query}");
@@ -868,6 +1094,27 @@ fn transaction_effect_ignores_ordinary_statements() {
 }
 
 #[test]
+fn test_calculate_query_timing_with_rows() {
+    let (server, fetch) = calculate_query_timing(50.0, Some(20.0));
+    assert_eq!(server, Some(20.0));
+    assert_eq!(fetch, Some(30.0));
+}
+
+#[test]
+fn test_calculate_query_timing_no_rows() {
+    let (server, fetch) = calculate_query_timing(50.0, None);
+    assert_eq!(server, Some(50.0));
+    assert_eq!(fetch, Some(0.0));
+}
+
+#[test]
+fn test_calculate_query_timing_fetch_non_negative() {
+    let (server, fetch) = calculate_query_timing(50.0, Some(55.0));
+    assert_eq!(server, Some(55.0));
+    assert_eq!(fetch, Some(0.0));
+}
+
+#[test]
 fn transaction_effect_sees_through_leading_comments() {
     assert_eq!(
         transaction_effect("-- start the transaction\nBEGIN"),
@@ -883,7 +1130,10 @@ fn transaction_effect_sees_through_leading_comments() {
 fn transaction_effect_handles_empty_input() {
     assert_eq!(transaction_effect(""), TransactionEffect::None);
     assert_eq!(transaction_effect("   \n"), TransactionEffect::None);
-    assert_eq!(transaction_effect("-- only a comment"), TransactionEffect::None);
+    assert_eq!(
+        transaction_effect("-- only a comment"),
+        TransactionEffect::None
+    );
 }
 
 #[test]
@@ -894,5 +1144,46 @@ fn transaction_effect_does_not_match_plpgsql_block_bodies() {
     assert_eq!(
         transaction_effect("DO $$ BEGIN RAISE NOTICE 'hi'; END $$"),
         TransactionEffect::None
+    );
+}
+
+#[test]
+fn full_type_if_distinct_keeps_types_with_modifiers() {
+    assert_eq!(
+        full_type_if_distinct("varchar", Some("varchar(255)".into())),
+        Some("varchar(255)".into())
+    );
+    assert_eq!(
+        full_type_if_distinct("decimal", Some("decimal(10,2)".into())),
+        Some("decimal(10,2)".into())
+    );
+    assert_eq!(
+        full_type_if_distinct("int", Some("int unsigned".into())),
+        Some("int unsigned".into())
+    );
+    assert_eq!(
+        full_type_if_distinct("ARRAY", Some("integer[]".into())),
+        Some("integer[]".into())
+    );
+}
+
+#[test]
+fn full_type_if_distinct_drops_repeats_and_blanks() {
+    assert_eq!(full_type_if_distinct("text", Some("text".into())), None);
+    assert_eq!(full_type_if_distinct("TEXT", Some("text".into())), None);
+    assert_eq!(
+        full_type_if_distinct("integer", Some(" integer ".into())),
+        None
+    );
+    assert_eq!(full_type_if_distinct("int", Some(String::new())), None);
+    assert_eq!(full_type_if_distinct("int", Some("   ".into())), None);
+    assert_eq!(full_type_if_distinct("int", None), None);
+}
+
+#[test]
+fn full_type_if_distinct_trims_the_kept_value() {
+    assert_eq!(
+        full_type_if_distinct("char", Some(" char(10) ".into())),
+        Some("char(10)".into())
     );
 }

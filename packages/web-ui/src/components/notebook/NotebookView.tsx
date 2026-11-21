@@ -1,0 +1,1211 @@
+import {useState, useCallback, useRef, useEffect, useMemo} from 'react';
+import {flushSync} from 'react-dom';
+import {useTranslation} from 'react-i18next';
+import {BookOpen, Loader2} from 'lucide-react';
+import type {Tab} from '@/types/editor';
+import type {
+    NotebookCell,
+    NotebookCellType,
+    NotebookParam,
+    NotebookState,
+    NotebookViewMode,
+    RunAllResult,
+} from '@/types/notebook';
+import {
+    updateCellInCells,
+    addCellToCells,
+    duplicateCellToEnd,
+    removeCellFromCells,
+    clearCellOutputs,
+    hasCellOutputs,
+} from '@/utils/notebook';
+import {
+    computeAutoScrollSpeed,
+    createCellDragPreview,
+    moveCell,
+    reorderCells,
+} from '@/utils/notebookDnd';
+import {
+    chooseNotebookImport,
+    downloadNotebook,
+    downloadNotebookHtml,
+    downloadNotebookMarkdown,
+    downloadNotebookSql,
+} from '@/utils/notebookTransfer';
+import {isTypingTarget} from '@/utils/keyboardEvents';
+import {flushPendingEditorChanges} from '@/utils/pendingEditorChanges';
+import {
+    getExecutableCells,
+    getDisabledCells,
+    findDisabledPrerequisites,
+    createRunAllResult,
+    addSuccess,
+    addFailure,
+    addSkipped,
+    addBlocked,
+} from '@/utils/notebookRunAll';
+import {
+    resolveQueryVariables,
+    findUnresolvedDependencies,
+    variableOptionsForDriver,
+} from '@/utils/notebookVariables';
+import {resolveParams} from '@/utils/notebookParams';
+import {resolveSqlSyntax} from '@/utils/sqlSyntax';
+import {addHistoryEntry, createHistoryEntry} from '@/utils/notebookHistory';
+import {
+    createHistory,
+    recordEdit,
+    undo as undoHistory,
+    redo as redoHistory,
+    jumpTo as jumpToHistory,
+    timeline as historyTimeline,
+    type NotebookHistory,
+} from '@/utils/notebookUndo';
+import {
+    getNotebookState,
+    setNotebookState as storeSetState,
+    loadNotebook,
+    setNotebookTitle,
+    createNotebookFromState,
+} from '@/utils/notebookStore';
+import {useDatabase} from '@/hooks/useDatabase';
+import {useSqlAutocompleteRegistration} from '@/hooks/useSqlAutocompleteRegistration';
+import {usesMultiDatabaseLayout} from '@/utils/database';
+import {useSettings} from '@/hooks/useSettings';
+import {useAlert} from '@/hooks/useAlert';
+import {useKeybindings} from '@/hooks/useKeybindings';
+import {DANGEROUS_QUERY_I18N} from '@/hooks/useDangerousQueryGuard';
+import {useQueryGuards} from '@/hooks/useQueryGuards';
+import {ConfirmModal} from '@/components/modals/ConfirmModal';
+import {NotebookToolbar} from './NotebookToolbar';
+import {NotebookHistoryPanel} from './NotebookHistoryPanel';
+import {NotebookCellWrapper} from './NotebookCellWrapper';
+import {AddCellButton} from './AddCellButton';
+import {RunAllSummary} from './RunAllSummary';
+import {ParamsPanel} from './ParamsPanel';
+import {NotebookOutline} from './NotebookOutline';
+import {NotebookReportView} from './NotebookReportView';
+import {useTabularisClient} from '@/hooks/useTabularisClient';
+import {usePlatformCapabilities} from '@/hooks/usePlatformCapabilities';
+
+/** 'skipped': the cell was disabled before its query was sent, so nothing ran. */
+type CellRunOutcome = 'skipped' | undefined;
+
+interface NotebookViewProps {
+    tab: Tab;
+    updateTab: (id: string, partial: Partial<Tab>) => void;
+    connectionId: string;
+    /** Whether this notebook tab is the active one (gates keyboard shortcuts). */
+    isActive: boolean;
+}
+
+export function NotebookView({tab, updateTab, connectionId, isActive}: NotebookViewProps) {
+    const client = useTabularisClient();
+    const platform = usePlatformCapabilities();
+    const {t} = useTranslation();
+    const {activeSchema, activeCapabilities, selectedDatabases, activeDriver} = useDatabase();
+    // Lets notebook parameters skip `@name` inside string literals and comments.
+    const sqlDialect = resolveSqlSyntax(activeCapabilities);
+    const variableOptions = useMemo(
+        () => variableOptionsForDriver(activeCapabilities ?? activeDriver, activeDriver),
+        [activeCapabilities, activeDriver],
+    );
+    const isMultiDb = usesMultiDatabaseLayout(activeCapabilities, selectedDatabases);
+    const effectiveSchema = tab.schema || activeSchema || (isMultiDb ? selectedDatabases[0] : null);
+    useSqlAutocompleteRegistration(connectionId, {
+        schema: effectiveSchema,
+        database: tab.database,
+        enabled: isActive,
+    });
+    const {settings} = useSettings();
+    const {showAlert} = useAlert();
+    const {matchesShortcut} = useKeybindings();
+    const {
+        pending: dangerousQuery,
+        guardQuery: guardQueryExecution,
+        resolve: resolveDangerousQuery,
+    } = useQueryGuards(connectionId);
+
+    // Local notebook state — loaded from store/disk, NOT from tab
+    const [notebook, setNotebook] = useState<NotebookState | null>(() =>
+        tab.notebookId ? (getNotebookState(tab.notebookId) ?? null) : null,
+    );
+    const [isLoadingNotebook, setIsLoadingNotebook] = useState(!notebook);
+
+    const [isRunningAll, setIsRunningAll] = useState(false);
+    const [runAllResult, setRunAllResult] = useState<RunAllResult | null>(null);
+    const [isClearOutputsConfirmOpen, setIsClearOutputsConfirmOpen] = useState(false);
+    const [viewMode, setViewMode] = useState<NotebookViewMode>('edit');
+    const [executedParamsByCell, setExecutedParamsByCell] = useState<Record<string, string>>({});
+    const [dragIndex, setDragIndex] = useState<number | null>(null);
+    // Gap-based insertion point in [0, cells.length]; `null` while not dragging.
+    const [dropPos, setDropPos] = useState<number | null>(null);
+    const cellsRef = useRef<NotebookCell[]>(notebook?.cells ?? []);
+    const cellRefsMap = useRef<Map<string, HTMLDivElement>>(new Map());
+    const scrollContainerRef = useRef<HTMLDivElement>(null);
+    const autoScrollSpeedRef = useRef(0);
+    const autoScrollRafRef = useRef<number | null>(null);
+    const notebookIdRef = useRef(tab.notebookId);
+    const runCellRef = useRef<(cellId: string) => Promise<CellRunOutcome>>(async () => undefined);
+
+    // Undo/redo history (autosave means edits are otherwise irreversible).
+    const notebookRef = useRef<NotebookState | null>(notebook);
+    const [history, setHistory] = useState<NotebookHistory>(createHistory);
+    const historyRef = useRef<NotebookHistory>(history);
+    const isActiveRef = useRef(isActive);
+    const [showHistory, setShowHistory] = useState(false);
+    const canUndo = history.past.length > 0;
+    const canRedo = history.future.length > 0;
+
+    // Keep refs in sync
+    useEffect(() => {
+        notebookIdRef.current = tab.notebookId;
+    }, [tab.notebookId]);
+
+    useEffect(() => {
+        notebookRef.current = notebook;
+    }, [notebook]);
+
+    useEffect(() => {
+        isActiveRef.current = isActive;
+    }, [isActive]);
+
+    useEffect(() => {
+        historyRef.current = history;
+    }, [history]);
+
+    // Commit a new history (updates both the ref used by callbacks and state).
+    const commitHistory = useCallback((next: NotebookHistory) => {
+        historyRef.current = next;
+        setHistory(next);
+    }, []);
+
+    // Reset undo/redo history (e.g. after importing a different notebook).
+    const resetHistory = useCallback(() => {
+        commitHistory(createHistory());
+    }, [commitHistory]);
+
+    // Load notebook from disk when not already cached
+    useEffect(() => {
+        if (!tab.notebookId || notebook) return;
+
+        let cancelled = false;
+        loadNotebook(tab.notebookId, connectionId, client).then((state) => {
+            if (cancelled) return;
+            setNotebook(state);
+            cellsRef.current = state.cells;
+            setIsLoadingNotebook(false);
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [client, connectionId, notebook, tab.notebookId]);
+
+    // Sync tab title to notebook store
+    useEffect(() => {
+        if (tab.notebookId) {
+            setNotebookTitle(tab.notebookId, tab.title);
+        }
+    }, [tab.notebookId, tab.title]);
+
+    const cells = notebook?.cells ?? [];
+    const stopOnError = notebook?.stopOnError ?? false;
+    const params = useMemo(() => notebook?.params ?? [], [notebook?.params]);
+    const currentParamsSignature = useMemo(() => JSON.stringify(params), [params]);
+    const outdatedCellIds = useMemo(() => {
+        const set = new Set<string>();
+        for (const [cellId, ranParams] of Object.entries(executedParamsByCell)) {
+            if (ranParams !== currentParamsSignature) {
+                set.add(cellId);
+            }
+        }
+        return set;
+    }, [executedParamsByCell, currentParamsSignature]);
+
+    const updateNotebook = useCallback(
+        (
+            newCells: NotebookCell[],
+            extraState?: {
+                stopOnError?: boolean;
+                params?: NotebookParam[];
+            },
+        ) => {
+            const prevState = notebookRef.current;
+            cellsRef.current = newCells;
+            const newState: NotebookState = {
+                cells: newCells,
+                stopOnError:
+                    extraState?.stopOnError !== undefined
+                        ? extraState.stopOnError
+                        : notebook?.stopOnError,
+                params: extraState?.params !== undefined ? extraState.params : notebook?.params,
+            };
+            notebookRef.current = newState;
+            setNotebook(newState);
+            if (prevState) {
+                const next = recordEdit(historyRef.current, prevState, newState, Date.now());
+                if (next !== historyRef.current) commitHistory(next);
+            }
+            if (notebookIdRef.current) {
+                storeSetState(notebookIdRef.current, newState);
+            }
+        },
+        [notebook?.stopOnError, notebook?.params, commitHistory],
+    );
+
+    /** Apply a state from the history without recording a new entry. */
+    const applyHistoryState = useCallback((state: NotebookState) => {
+        cellsRef.current = state.cells;
+        notebookRef.current = state;
+        setNotebook(state);
+        if (notebookIdRef.current) {
+            storeSetState(notebookIdRef.current, state);
+        }
+    }, []);
+
+    const handleUndo = useCallback(() => {
+        const current = notebookRef.current;
+        if (!current) return;
+        const step = undoHistory(historyRef.current, current);
+        if (!step) return;
+        commitHistory(step.history);
+        applyHistoryState(step.state);
+    }, [applyHistoryState, commitHistory]);
+
+    const handleRedo = useCallback(() => {
+        const current = notebookRef.current;
+        if (!current) return;
+        const step = redoHistory(historyRef.current, current);
+        if (!step) return;
+        commitHistory(step.history);
+        applyHistoryState(step.state);
+    }, [applyHistoryState, commitHistory]);
+
+    const handleJump = useCallback(
+        (index: number) => {
+            const current = notebookRef.current;
+            if (!current) return;
+            const step = jumpToHistory(historyRef.current, current, index);
+            if (!step) return;
+            commitHistory(step.history);
+            applyHistoryState(step.state);
+            setShowHistory(false);
+        },
+        [applyHistoryState, commitHistory],
+    );
+
+    const updateCell = useCallback(
+        (cellId: string, partial: Partial<NotebookCell>) => {
+            updateNotebook(updateCellInCells(cellsRef.current, cellId, partial));
+        },
+        [updateNotebook],
+    );
+
+    const focusCell = useCallback((cellId: string) => {
+        const tryFocus = (attempts: number) => {
+            const el = cellRefsMap.current.get(cellId);
+            if (!el) {
+                if (attempts < 10) requestAnimationFrame(() => tryFocus(attempts + 1));
+                return;
+            }
+            const monacoTextarea = el.querySelector<HTMLTextAreaElement>('.monaco-editor textarea');
+            if (monacoTextarea) {
+                monacoTextarea.focus();
+                return;
+            }
+            const textarea = el.querySelector<HTMLTextAreaElement>('textarea');
+            if (textarea) {
+                textarea.focus();
+                return;
+            }
+            if (attempts < 10) requestAnimationFrame(() => tryFocus(attempts + 1));
+        };
+        requestAnimationFrame(() => tryFocus(0));
+    }, []);
+
+    /** Commit cells that contain the new cell `newCellId`, then scroll to and focus it. */
+    const insertCells = useCallback(
+        (newCells: NotebookCell[], newCellId: string) => {
+            flushSync(() => updateNotebook(newCells));
+            cellRefsMap.current
+                .get(newCellId)
+                ?.scrollIntoView({behavior: 'smooth', block: 'start'});
+            focusCell(newCellId);
+        },
+        [updateNotebook, focusCell],
+    );
+
+    const addCell = useCallback(
+        (type: NotebookCellType, afterIndex?: number): string => {
+            const newCells = addCellToCells(cellsRef.current, type, afterIndex);
+            const insertAt = afterIndex !== undefined ? afterIndex + 1 : newCells.length - 1;
+            const newCellId = newCells[insertAt].id;
+            insertCells(newCells, newCellId);
+            return newCellId;
+        },
+        [insertCells],
+    );
+
+    const deleteCell = useCallback(
+        (cellId: string) => {
+            updateNotebook(removeCellFromCells(cellsRef.current, cellId));
+        },
+        [updateNotebook],
+    );
+
+    const toggleStopOnError = useCallback(() => {
+        updateNotebook(cellsRef.current, {stopOnError: !stopOnError});
+    }, [updateNotebook, stopOnError]);
+
+    const handleParamsChange = useCallback(
+        (newParams: NotebookParam[]) => {
+            updateNotebook(cellsRef.current, {params: newParams});
+        },
+        [updateNotebook],
+    );
+
+    const runCellInner = useCallback(
+        async (cellId: string): Promise<CellRunOutcome> => {
+            const cell = cellsRef.current.find((c) => c.id === cellId);
+            // A disabled cell never runs, whichever way it is asked to.
+            if (cell?.isDisabled) return 'skipped';
+            if (!cell || cell.type !== 'sql' || !cell.content.trim()) return;
+
+            // The cell can be disabled while it waits (dependencies, the query
+            // guard's confirmation): look again before every step that can send SQL.
+            const disabledMeanwhile = () => {
+                if (!cellsRef.current.find((c) => c.id === cellId)?.isDisabled) return false;
+                updateCell(cellId, {isLoading: false});
+                return true;
+            };
+
+            // Earlier output stays until the query is really sent, so a cell that is
+            // disabled while it waits keeps what it showed before.
+            updateCell(cellId, {isLoading: true});
+
+            const pageSize =
+                settings.resultPageSize && settings.resultPageSize > 0
+                    ? settings.resultPageSize
+                    : 100;
+
+            const cellSchema = cell.schema || effectiveSchema;
+
+            // Resolve notebook parameters first
+            let sql = cell.content.trim();
+            if (params.length > 0) {
+                const paramResult = resolveParams(sql, params, sqlDialect);
+                if (paramResult.unresolvedParams.length > 0) {
+                    // Only warn, don't block — unresolved @params might be SQL variables
+                }
+                sql = paramResult.sql;
+            }
+
+            // Block before anything runs when a prerequisite, direct or through cells
+            // that would have to run first, is disabled.
+            const disabledDeps = findDisabledPrerequisites(sql, cellsRef.current, (source) =>
+                params.length > 0 ? resolveParams(source, params).sql : source,
+            );
+            if (disabledDeps.length > 0) {
+                updateCell(cellId, {
+                    error: t('editor.notebook.blockedByDisabled', {
+                        count: disabledDeps.length,
+                        refs: disabledDeps.map((i) => `{{cell_${i + 1}}}`).join(', '),
+                    }),
+                    isLoading: false,
+                    result: null,
+                });
+                return;
+            }
+
+            // Lazy-execute unresolved cell dependencies
+            const unresolvedDeps = findUnresolvedDependencies(sql, cellsRef.current);
+            if (unresolvedDeps.length > 0) {
+                for (const depIndex of unresolvedDeps) {
+                    const depCell = cellsRef.current[depIndex];
+                    if (
+                        depCell &&
+                        depCell.type === 'sql' &&
+                        depCell.content.trim() &&
+                        !depCell.isDisabled
+                    ) {
+                        await runCellRef.current(depCell.id);
+                        if (disabledMeanwhile()) return 'skipped';
+                        // Check if dependency failed
+                        const updated = cellsRef.current[depIndex];
+                        if (updated?.error) {
+                            updateCell(cellId, {
+                                error: `Dependency {{cell_${depIndex + 1}}} failed: ${updated.error}`,
+                                isLoading: false,
+                                result: null,
+                            });
+                            return;
+                        }
+                    }
+                }
+            }
+
+            // Resolve cell variable references (dependencies should now have results)
+            const {sql: resolvedSql, unresolvedRefs} = resolveQueryVariables(
+                sql,
+                cellsRef.current,
+                variableOptions,
+            );
+
+            if (unresolvedRefs.length > 0) {
+                const refLabels = unresolvedRefs
+                    .map((r) => `{{cell_${r.cellIndex + 1}}}`)
+                    .join(', ');
+                updateCell(cellId, {
+                    error: `Unresolved cell references: ${refLabels}. Referenced cells must be SQL cells with content.`,
+                    isLoading: false,
+                    result: null,
+                });
+                return;
+            }
+
+            if (disabledMeanwhile()) return 'skipped';
+            const mayRun = await guardQueryExecution(resolvedSql);
+            if (disabledMeanwhile()) return 'skipped';
+            if (!mayRun) {
+                updateCell(cellId, {isLoading: false});
+                return;
+            }
+
+            updateCell(cellId, {error: undefined, result: null});
+            const start = performance.now();
+            try {
+                const res = await client.call('execute_query', {
+                    connectionId,
+                    query: resolvedSql,
+                    limit: pageSize,
+                    page: 1,
+                    ...(cellSchema ? {schema: cellSchema} : {}),
+                });
+                const elapsed = performance.now() - start;
+
+                const historyEntry = createHistoryEntry(
+                    cell.content.trim(),
+                    res,
+                    undefined,
+                    elapsed,
+                );
+                const newHistory = addHistoryEntry(cell.history ?? [], historyEntry);
+
+                updateCell(cellId, {
+                    result: res,
+                    executionTime: elapsed,
+                    isLoading: false,
+                    error: undefined,
+                    history: newHistory,
+                });
+                setExecutedParamsByCell((prev) => ({...prev, [cellId]: currentParamsSignature}));
+            } catch (e: unknown) {
+                const elapsed = performance.now() - start;
+                const errorMsg = e instanceof Error ? e.message : String(e);
+
+                const historyEntry = createHistoryEntry(
+                    cell.content.trim(),
+                    null,
+                    errorMsg,
+                    elapsed,
+                );
+                const newHistory = addHistoryEntry(cell.history ?? [], historyEntry);
+
+                updateCell(cellId, {
+                    error: errorMsg,
+                    executionTime: elapsed,
+                    isLoading: false,
+                    result: null,
+                    history: newHistory,
+                });
+                setExecutedParamsByCell((prev) => ({...prev, [cellId]: currentParamsSignature}));
+            }
+        },
+        [
+            client,
+            connectionId,
+            effectiveSchema,
+            settings.resultPageSize,
+            updateCell,
+            params,
+            currentParamsSignature,
+            sqlDialect,
+            variableOptions,
+            guardQueryExecution,
+            t,
+        ],
+    );
+
+    // Number of cells currently executing. The tab's `isLoading` flag drives the
+    // running indicator on the editor tab strip, so it must stay on while any
+    // cell is still running and go off only when the last one finishes.
+    const runningCellsRef = useRef(0);
+
+    const runCell = useCallback(
+        async (cellId: string): Promise<CellRunOutcome> => {
+            runningCellsRef.current += 1;
+            if (runningCellsRef.current === 1) {
+                updateTab(tab.id, {isLoading: true});
+            }
+            try {
+                return await runCellInner(cellId);
+            } finally {
+                runningCellsRef.current -= 1;
+                if (runningCellsRef.current === 0) {
+                    updateTab(tab.id, {isLoading: false});
+                }
+            }
+        },
+        [runCellInner, tab.id, updateTab],
+    );
+
+    useEffect(() => {
+        runCellRef.current = runCell;
+    }, [runCell]);
+
+    const runAll = useCallback(async () => {
+        setIsRunningAll(true);
+        setRunAllResult(null);
+
+        const prepare = (source: string) =>
+            params.length > 0 ? resolveParams(source, params).sql : source;
+        const executable = getExecutableCells(cellsRef.current);
+        const disabledCount = getDisabledCells(cellsRef.current).length;
+        let result = createRunAllResult();
+        result = {...result, total: executable.length + disabledCount};
+        // Disabled cells are not run: they are counted as skipped.
+        if (disabledCount > 0) result = addSkipped(result, disabledCount);
+
+        type Outcome =
+            | {kind: 'skipped'}
+            | {kind: 'blocked'; disabledCells: Array<{cellId: string; cellIndex: number}>}
+            | {kind: 'ran'};
+
+        // Re-read the cell right before it starts: it may have been disabled
+        // while earlier cells ran, or its prerequisites may have been.
+        const startCell = (cellId: string): {outcome: Outcome; run: Promise<CellRunOutcome>} => {
+            const current = cellsRef.current.find((c) => c.id === cellId);
+            if (!current || current.isDisabled) {
+                return {outcome: {kind: 'skipped'}, run: Promise.resolve('skipped')};
+            }
+            const disabledDeps = findDisabledPrerequisites(
+                prepare(current.content.trim()),
+                cellsRef.current,
+                prepare,
+            );
+            // runCell marks a blocked cell with the reason without executing it.
+            const run = runCell(cellId);
+            if (disabledDeps.length > 0) {
+                return {
+                    outcome: {
+                        kind: 'blocked',
+                        disabledCells: disabledDeps.map((i) => ({
+                            cellId: cellsRef.current[i]?.id ?? '',
+                            cellIndex: i,
+                        })),
+                    },
+                    run,
+                };
+            }
+            return {outcome: {kind: 'ran'}, run};
+        };
+
+        const record = (
+            current: RunAllResult,
+            outcome: Outcome,
+            cellId: string,
+            index: number,
+            ran: PromiseSettledResult<CellRunOutcome>,
+        ): {result: RunAllResult; failed: boolean} => {
+            // Also skipped: disabled after it started but before its query was sent.
+            if (
+                outcome.kind === 'skipped' ||
+                (ran.status === 'fulfilled' && ran.value === 'skipped')
+            ) {
+                return {result: addSkipped(current, 1), failed: false};
+            }
+            if (outcome.kind === 'blocked') {
+                return {
+                    result: addBlocked(current, cellId, index, outcome.disabledCells),
+                    failed: false,
+                };
+            }
+            const updatedCell = cellsRef.current.find((c) => c.id === cellId);
+            if (updatedCell?.error || ran.status === 'rejected') {
+                return {
+                    result: addFailure(
+                        current,
+                        cellId,
+                        index,
+                        updatedCell?.error ?? 'Execution failed',
+                    ),
+                    failed: true,
+                };
+            }
+            return {result: addSuccess(current), failed: false};
+        };
+
+        // Split into parallel and sequential groups
+        const parallelCells = executable.filter(({cell}) => cell.isParallel);
+        const sequentialCells = executable.filter(({cell}) => !cell.isParallel);
+
+        // Run parallel cells concurrently
+        if (parallelCells.length > 0) {
+            const started = parallelCells.map(({cell}) => startCell(cell.id));
+            const parallelResults = await Promise.allSettled(started.map(({run}) => run));
+            for (let i = 0; i < parallelCells.length; i++) {
+                const {cell, index} = parallelCells[i];
+                result = record(
+                    result,
+                    started[i].outcome,
+                    cell.id,
+                    index,
+                    parallelResults[i],
+                ).result;
+            }
+        }
+
+        // Run sequential cells one by one
+        for (let i = 0; i < sequentialCells.length; i++) {
+            const {cell, index} = sequentialCells[i];
+            const {outcome, run} = startCell(cell.id);
+            const [ran] = await Promise.allSettled([run]);
+
+            const recorded = record(result, outcome, cell.id, index, ran);
+            result = recorded.result;
+            if (recorded.failed && stopOnError) {
+                const remaining = sequentialCells.length - i - 1;
+                if (remaining > 0) {
+                    result = addSkipped(result, remaining);
+                }
+                break;
+            }
+        }
+
+        setRunAllResult(result);
+        setIsRunningAll(false);
+    }, [params, runCell, stopOnError]);
+
+    const handleExport = useCallback(async () => {
+        // Export what the editors show, including a keystroke still held back.
+        flushPendingEditorChanges();
+        try {
+            const downloaded = await downloadNotebook(platform, tab.title, {
+                cells: cellsRef.current,
+                params,
+                stopOnError,
+            });
+            if (downloaded) {
+                showAlert(t('editor.notebook.exportSuccess'), {kind: 'info'});
+            }
+        } catch (e) {
+            console.error('Notebook export failed:', e);
+            showAlert(
+                t('editor.notebook.exportError') ||
+                    `Export failed: ${e instanceof Error ? e.message : String(e)}`,
+                {kind: 'error'},
+            );
+        }
+    }, [params, platform, showAlert, stopOnError, t, tab.title]);
+
+    const handleExportHtml = useCallback(async () => {
+        // Export what the editors show, including a keystroke still held back.
+        flushPendingEditorChanges();
+        try {
+            const downloaded = await downloadNotebookHtml(platform, tab.title, {
+                cells: cellsRef.current,
+                params,
+                stopOnError,
+            });
+            if (downloaded) {
+                showAlert(t('editor.notebook.exportSuccess'), {kind: 'info'});
+            }
+        } catch (e) {
+            console.error('HTML export failed:', e);
+            showAlert(
+                t('editor.notebook.exportError') ||
+                    `Export failed: ${e instanceof Error ? e.message : String(e)}`,
+                {kind: 'error'},
+            );
+        }
+    }, [params, platform, showAlert, stopOnError, t, tab.title]);
+
+    const handleExportSql = useCallback(async () => {
+        // Export what the editors show, including a keystroke still held back.
+        flushPendingEditorChanges();
+        try {
+            const outcome = await downloadNotebookSql(platform, tab.title, {
+                cells: cellsRef.current,
+            });
+            if (outcome === 'empty') {
+                showAlert(t('editor.notebook.exportSqlEmpty'), {kind: 'info'});
+            } else if (outcome === 'downloaded') {
+                showAlert(t('editor.notebook.exportSuccess'), {kind: 'info'});
+            }
+        } catch (e) {
+            console.error('SQL export failed:', e);
+            showAlert(
+                t('editor.notebook.exportError') ||
+                    `Export failed: ${e instanceof Error ? e.message : String(e)}`,
+                {kind: 'error'},
+            );
+        }
+    }, [platform, showAlert, t, tab.title]);
+
+    const handleExportMarkdown = useCallback(async () => {
+        // Export what the editors show, including a keystroke still held back.
+        flushPendingEditorChanges();
+        try {
+            const outcome = await downloadNotebookMarkdown(platform, tab.title, {
+                cells: cellsRef.current,
+            });
+            if (outcome === 'empty') {
+                showAlert(t('editor.notebook.exportMarkdownEmpty'), {kind: 'info'});
+            } else if (outcome === 'downloaded') {
+                showAlert(t('editor.notebook.exportSuccess'), {kind: 'info'});
+            }
+        } catch (e) {
+            console.error('Markdown export failed:', e);
+            showAlert(
+                t('editor.notebook.exportError') ||
+                    `Export failed: ${e instanceof Error ? e.message : String(e)}`,
+                {kind: 'error'},
+            );
+        }
+    }, [platform, showAlert, t, tab.title]);
+
+    const handleImport = useCallback(async () => {
+        try {
+            const imported = await chooseNotebookImport(platform);
+            if (!imported) return;
+            const {title, state: importedState} = imported;
+            const importedCells = importedState.cells;
+
+            // Create a new notebook file for the imported content
+            const {notebookId: newId} = await createNotebookFromState(
+                title,
+                importedState,
+                connectionId,
+                client,
+            );
+
+            // Update the tab to point to the new notebook
+            updateTab(tab.id, {notebookId: newId, title});
+
+            // Update local state — a different notebook now, so drop its history.
+            setNotebook(importedState);
+            notebookRef.current = importedState;
+            cellsRef.current = importedCells;
+            resetHistory();
+
+            showAlert(t('editor.notebook.importSuccess'), {kind: 'info'});
+        } catch {
+            showAlert(t('editor.notebook.invalidFile'), {kind: 'error'});
+        }
+    }, [client, connectionId, platform, resetHistory, showAlert, t, tab.id, updateTab]);
+
+    // Drag & Drop handlers
+    const handleDragStart = useCallback(
+        (index: number) => (e: React.DragEvent) => {
+            setDragIndex(index);
+            e.dataTransfer.effectAllowed = 'move';
+            e.dataTransfer.setData('text/plain', String(index));
+
+            // Show a small "held card" under the cursor instead of the browser's
+            // default faded in-place screenshot, so it feels like carrying the cell.
+            const cell = cellsRef.current[index];
+            if (cell) {
+                const preview = createCellDragPreview(document, {
+                    name: cell.name?.trim() || t('editor.notebook.cellNamePlaceholder'),
+                    typeLabel:
+                        cell.type === 'sql'
+                            ? t('editor.notebook.sqlCell')
+                            : t('editor.notebook.markdownCell'),
+                    type: cell.type,
+                });
+                e.dataTransfer.setDragImage(preview, 12, 12);
+                // The browser snapshots the element synchronously on drag start; drop
+                // it from the DOM on the next tick.
+                setTimeout(() => preview.remove(), 0);
+            }
+        },
+        [t],
+    );
+
+    const stopAutoScroll = useCallback(() => {
+        if (autoScrollRafRef.current !== null) {
+            cancelAnimationFrame(autoScrollRafRef.current);
+            autoScrollRafRef.current = null;
+        }
+        autoScrollSpeedRef.current = 0;
+    }, []);
+
+    // rAF loop so the list keeps scrolling while the cursor is held near an edge,
+    // even when no further dragover events fire (native DnD doesn't auto-scroll).
+    const stepAutoScroll = useCallback(() => {
+        const tick = () => {
+            const container = scrollContainerRef.current;
+            const speed = autoScrollSpeedRef.current;
+            if (!container || speed === 0) {
+                autoScrollRafRef.current = null;
+                return;
+            }
+            container.scrollTop += speed;
+            autoScrollRafRef.current = requestAnimationFrame(tick);
+        };
+        tick();
+    }, []);
+
+    const handleDragEnd = useCallback(() => {
+        setDragIndex(null);
+        setDropPos(null);
+        stopAutoScroll();
+    }, [stopAutoScroll]);
+
+    const handleDragOver = useCallback(
+        (index: number) => (e: React.DragEvent) => {
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'move';
+            // Above the cell's midpoint drops before it, below drops after it.
+            const rect = e.currentTarget.getBoundingClientRect();
+            const after = e.clientY > rect.top + rect.height / 2;
+            setDropPos(after ? index + 1 : index);
+        },
+        [],
+    );
+
+    // Drive edge auto-scroll from the scroll container so a tall cell can't trap
+    // the drag — without this you can't reach the edge to scroll past it.
+    const handleContainerDragOver = useCallback(
+        (e: React.DragEvent) => {
+            if (dragIndex === null) return;
+            const container = scrollContainerRef.current;
+            if (!container) return;
+            const speed = computeAutoScrollSpeed(container.getBoundingClientRect(), e.clientY);
+            autoScrollSpeedRef.current = speed;
+            if (speed !== 0 && autoScrollRafRef.current === null) {
+                autoScrollRafRef.current = requestAnimationFrame(stepAutoScroll);
+            }
+        },
+        [dragIndex, stepAutoScroll],
+    );
+
+    const handleDrop = useCallback(
+        (index: number) => (e: React.DragEvent) => {
+            e.preventDefault();
+            const fromIndex = dragIndex;
+            const rect = e.currentTarget.getBoundingClientRect();
+            const insertAt = e.clientY > rect.top + rect.height / 2 ? index + 1 : index;
+            setDragIndex(null);
+            setDropPos(null);
+            stopAutoScroll();
+            if (fromIndex === null) return;
+            updateNotebook(moveCell(cellsRef.current, fromIndex, insertAt));
+        },
+        [dragIndex, updateNotebook, stopAutoScroll],
+    );
+
+    // Cancel any in-flight auto-scroll frame if the view unmounts mid-drag.
+    useEffect(() => stopAutoScroll, [stopAutoScroll]);
+
+    const scrollToCell = useCallback((cellId: string) => {
+        const el = cellRefsMap.current.get(cellId);
+        el?.scrollIntoView({behavior: 'smooth', block: 'start'});
+    }, []);
+
+    // Keyboard shortcuts (only for the active notebook tab):
+    // Ctrl+Shift+Enter → Run All, Cmd/Ctrl+Z → Undo, Cmd/Ctrl+Shift+Z / Ctrl+Y → Redo.
+    useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (!isActiveRef.current) return;
+
+            if (matchesShortcut(e, 'notebook_run_all')) {
+                e.preventDefault();
+                runAll();
+                return;
+            }
+
+            if (viewMode === 'report') return;
+
+            const mod = e.metaKey || e.ctrlKey;
+            if (!mod) return;
+            const key = e.key.toLowerCase();
+            if (key !== 'z' && key !== 'y') return;
+
+            // Defer to a focused cell editor / input so their own undo keeps working.
+            const el = document.activeElement as HTMLElement | null;
+            if (el && (el.closest('.monaco-editor') || isTypingTarget(el))) {
+                return;
+            }
+
+            if (key === 'y' || (key === 'z' && e.shiftKey)) {
+                e.preventDefault();
+                handleRedo();
+            } else if (key === 'z') {
+                e.preventDefault();
+                handleUndo();
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, [matchesShortcut, runAll, handleUndo, handleRedo, viewMode]);
+
+    const collapseAll = useCallback(() => {
+        updateNotebook(cellsRef.current.map((c) => ({...c, isCollapsed: true})));
+    }, [updateNotebook]);
+
+    const expandAll = useCallback(() => {
+        updateNotebook(cellsRef.current.map((c) => ({...c, isCollapsed: false})));
+    }, [updateNotebook]);
+
+    // Clearing outputs only touches live runtime state: nothing is executed or
+    // deleted from the saved notebook, and it is not an undo step.
+    const isExecuting = isRunningAll || cells.some((c) => c.isLoading);
+    const canClearOutputs = !isExecuting && hasCellOutputs(cells);
+
+    // Append a document-only copy of a cell; never while anything is executing.
+    const duplicateCell = useCallback(
+        (cellId: string) => {
+            if (isExecuting) return;
+            const newCells = duplicateCellToEnd(cellsRef.current, cellId);
+            if (newCells === cellsRef.current) return;
+            insertCells(newCells, newCells[newCells.length - 1].id);
+        },
+        [isExecuting, insertCells],
+    );
+
+    const clearOutputs = useCallback(() => {
+        setIsClearOutputsConfirmOpen(false);
+        if (isExecuting) return;
+        updateNotebook(clearCellOutputs(cellsRef.current));
+        setExecutedParamsByCell({});
+        setRunAllResult(null);
+    }, [isExecuting, updateNotebook]);
+
+    const handleViewModeChange = useCallback((mode: NotebookViewMode) => {
+        setViewMode(mode);
+        if (mode === 'report') {
+            setShowHistory(false);
+        }
+    }, []);
+
+    const toolbarProps = {
+        onAddSqlCell: () => addCell('sql'),
+        onAddMarkdownCell: () => addCell('markdown'),
+        onRunAll: runAll,
+        onExport: handleExport,
+        onExportHtml: handleExportHtml,
+        onExportSql: handleExportSql,
+        onExportMarkdown: handleExportMarkdown,
+        onImport: handleImport,
+        isRunning: isRunningAll,
+        stopOnError,
+        onToggleStopOnError: toggleStopOnError,
+        onCollapseAll: collapseAll,
+        onExpandAll: expandAll,
+        onClearOutputs: () => setIsClearOutputsConfirmOpen(true),
+        canClearOutputs,
+        onUndo: handleUndo,
+        onRedo: handleRedo,
+        canUndo,
+        canRedo,
+        onToggleHistory: () => setShowHistory((v) => !v),
+        historyOpen: showHistory,
+        viewMode,
+        onViewModeChange: handleViewModeChange,
+    };
+
+    // Loading state
+    if (isLoadingNotebook) {
+        return (
+            <div className="flex flex-col h-full">
+                <NotebookToolbar {...toolbarProps} />
+                <div className="flex-1 flex flex-col items-center justify-center gap-3 text-muted">
+                    <Loader2 size={32} className="animate-spin opacity-40" />
+                </div>
+            </div>
+        );
+    }
+
+    // Empty state
+    if (cells.length === 0) {
+        return (
+            <div className="flex flex-col h-full">
+                <NotebookToolbar {...toolbarProps} />
+                <div className="flex-1 flex flex-col items-center justify-center gap-3 text-muted">
+                    <BookOpen size={32} className="opacity-40" />
+                    <p className="text-sm">{t('editor.notebook.emptyNotebook')}</p>
+                </div>
+            </div>
+        );
+    }
+
+    const historyView = historyTimeline(history, notebook ?? {cells});
+
+    // A drop line is shown in gap `pos` unless it'd leave the cell where it is.
+    const showLineAt = (pos: number) =>
+        dropPos === pos && dragIndex !== null && pos !== dragIndex && pos !== dragIndex + 1;
+    const renderDropLine = (placement: 'top' | 'bottom') => (
+        <div
+            className={`pointer-events-none absolute ${
+                placement === 'top' ? '-top-1.5' : '-bottom-1.5'
+            } left-0 right-0 z-10 flex items-center gap-1`}
+        >
+            <span className="h-2 w-2 shrink-0 rounded-full bg-accent-primary shadow-[0_0_6px_var(--accent-primary)]" />
+            <span className="h-0.5 flex-1 rounded-full bg-accent-primary shadow-[0_0_6px_var(--accent-primary)]" />
+        </div>
+    );
+
+    return (
+        <div className="flex flex-col h-full relative">
+            <ConfirmModal
+                isOpen={!!dangerousQuery}
+                onClose={() => resolveDangerousQuery(false)}
+                onConfirm={() => resolveDangerousQuery(true)}
+                title={t(
+                    dangerousQuery
+                        ? DANGEROUS_QUERY_I18N[dangerousQuery.kind].title
+                        : 'editor.dangerousQueryTitle',
+                )}
+                message={t(
+                    dangerousQuery
+                        ? DANGEROUS_QUERY_I18N[dangerousQuery.kind].message
+                        : 'editor.dangerousQueryMessage',
+                )}
+                sql={dangerousQuery?.sql}
+                confirmLabel={t('editor.dangerousQueryConfirm')}
+                variant="danger"
+                confirmDelaySeconds={settings.safetyConfirmationDelayEnabled ? 5 : undefined}
+            />
+            <ConfirmModal
+                isOpen={isClearOutputsConfirmOpen}
+                onClose={() => setIsClearOutputsConfirmOpen(false)}
+                onConfirm={clearOutputs}
+                title={t('editor.notebook.clearOutputs')}
+                message={t('editor.notebook.clearOutputsConfirm')}
+                confirmLabel={t('editor.notebook.clearOutputs')}
+                variant="warning"
+            />
+            <NotebookToolbar {...toolbarProps} />
+            {viewMode === 'report' ? (
+                <NotebookReportView
+                    cells={cells}
+                    params={params}
+                    onParamsChange={handleParamsChange}
+                    runAllResult={runAllResult}
+                    onDismissRunAllResult={() => setRunAllResult(null)}
+                    onSwitchToEdit={() => handleViewModeChange('edit')}
+                    outdatedCellIds={outdatedCellIds}
+                />
+            ) : (
+                <>
+                    {showHistory && (
+                        <NotebookHistoryPanel
+                            states={historyView.states}
+                            currentIndex={historyView.currentIndex}
+                            onJump={handleJump}
+                            onClose={() => setShowHistory(false)}
+                        />
+                    )}
+                    <div
+                        ref={scrollContainerRef}
+                        onDragOver={handleContainerDragOver}
+                        className="flex-1 overflow-auto p-4 space-y-0"
+                    >
+                        <ParamsPanel params={params} onParamsChange={handleParamsChange} />
+                        <NotebookOutline
+                            cells={cells}
+                            onScrollToCell={scrollToCell}
+                            onCellNameGenerated={(cellId, name) => updateCell(cellId, {name})}
+                        />
+
+                        {runAllResult && (
+                            <RunAllSummary
+                                result={runAllResult}
+                                onDismiss={() => setRunAllResult(null)}
+                                onScrollToCell={scrollToCell}
+                            />
+                        )}
+
+                        <AddCellButton
+                            onAddSql={() => addCell('sql', -1)}
+                            onAddMarkdown={() => addCell('markdown', -1)}
+                        />
+                        {cells.map((cell, index) => (
+                            <div
+                                key={cell.id}
+                                ref={(el) => {
+                                    if (el) cellRefsMap.current.set(cell.id, el);
+                                    else cellRefsMap.current.delete(cell.id);
+                                }}
+                                onDragOver={handleDragOver(index)}
+                                onDrop={handleDrop(index)}
+                                className="relative scroll-mt-4"
+                            >
+                                {showLineAt(index) && renderDropLine('top')}
+                                <NotebookCellWrapper
+                                    cell={cell}
+                                    index={index}
+                                    totalCells={cells.length}
+                                    onUpdate={(partial) => updateCell(cell.id, partial)}
+                                    onDelete={() => deleteCell(cell.id)}
+                                    onMoveUp={() => {
+                                        if (index > 0)
+                                            updateNotebook(
+                                                reorderCells(cellsRef.current, index, index - 1),
+                                            );
+                                    }}
+                                    onMoveDown={() => {
+                                        if (index < cells.length - 1)
+                                            updateNotebook(
+                                                reorderCells(cellsRef.current, index, index + 1),
+                                            );
+                                    }}
+                                    onRun={() => runCell(cell.id)}
+                                    onDuplicate={() => duplicateCell(cell.id)}
+                                    canDuplicate={!isExecuting}
+                                    connectionId={connectionId}
+                                    explainQuery={
+                                        cell.type === 'sql' &&
+                                        cell.isQueryPlanVisible &&
+                                        !cell.isDisabled
+                                            ? resolveQueryVariables(
+                                                  resolveParams(
+                                                      cell.content.trim(),
+                                                      params,
+                                                      sqlDialect,
+                                                  ).sql,
+                                                  cells,
+                                                  variableOptions,
+                                              )
+                                            : undefined
+                                    }
+                                    activeSchema={cell.schema || effectiveSchema || undefined}
+                                    selectedDatabases={isMultiDb ? selectedDatabases : undefined}
+                                    onSchemaChange={
+                                        isMultiDb
+                                            ? (schema) => updateCell(cell.id, {schema})
+                                            : undefined
+                                    }
+                                    isDragging={dragIndex === index}
+                                    dragHandleProps={{
+                                        draggable: true,
+                                        onDragStart: handleDragStart(index),
+                                        onDragEnd: handleDragEnd,
+                                    }}
+                                />
+                                <AddCellButton
+                                    onAddSql={() => addCell('sql', index)}
+                                    onAddMarkdown={() => addCell('markdown', index)}
+                                />
+                                {index === cells.length - 1 &&
+                                    showLineAt(cells.length) &&
+                                    renderDropLine('bottom')}
+                            </div>
+                        ))}
+                    </div>
+                </>
+            )}
+        </div>
+    );
+}

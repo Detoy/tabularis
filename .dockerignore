@@ -1,0 +1,21 @@
+# Allowlist: the image only needs the workspace manifests, the packages, the
+# Rust crate, the docker helpers and the one script the Web UI build imports.
+*
+!package.json
+!roadmap.json
+!pnpm-lock.yaml
+!pnpm-workspace.yaml
+!.node-version
+!packages/
+!plugins/manifest.schema.json
+!plugins/ai-assistants/manifest.schema.json
+!plugins/ai-assistants/packages/
+!scripts/generate-theme-schema-validators.ts
+!src-tauri/
+!docker/
+
+**/node_modules
+**/dist
+**/coverage
+src-tauri/target
+src-tauri/gen

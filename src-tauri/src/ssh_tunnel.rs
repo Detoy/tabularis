@@ -8,14 +8,13 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc, Arc, Mutex,
 };
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::io::copy_bidirectional;
 use tokio::runtime::Runtime;
-use tokio::sync::Mutex as TokioMutex;
 
 // Constants for timeouts and configuration
 const SSH_TUNNEL_TIMEOUT_SECS: u64 = 10;
@@ -23,6 +22,10 @@ const SSH_AUTH_TIMEOUT_SECS: u64 = 30;
 const SSH_ACCEPT_POLL_MS: u64 = 200;
 const SSH_CONNECT_RETRY_MS: u64 = 100;
 const DEFAULT_SSH_PORT: u16 = 22;
+/// Seconds between keepalives on an idle tunnel session.
+const SSH_KEEPALIVE_INTERVAL_SECS: u64 = 15;
+/// Unanswered keepalives after which the session counts as dropped.
+const SSH_KEEPALIVE_MAX: usize = 3;
 const LOG_BUFFER_INITIAL_CAPACITY: usize = 64;
 
 #[derive(Clone)]
@@ -75,10 +78,46 @@ impl client::Handler for RusshClientHandler {
     }
 }
 
+/// What the tunnel's local port forwards to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForwardTarget {
+    /// Like `ssh -L`: every connection goes to one `host:port`.
+    Fixed { host: String, port: u16 },
+    /// Like `ssh -L <localPort>:/path/to/socket`: every connection opens a
+    /// `direct-streamlocal@openssh.com` channel to a remote Unix socket.
+    UnixSocket { path: String },
+    /// Like `ssh -D`: the local port is a SOCKS5 proxy and each connection
+    /// names its own destination, resolved on the SSH server side.
+    Socks5,
+}
+
+impl ForwardTarget {
+    pub fn log_description(&self) -> String {
+        match self {
+            Self::Fixed { host, port } => format!("{}:{}", host, port),
+            Self::UnixSocket { path } => path.clone(),
+            Self::Socks5 => "socks5".to_string(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct SshTunnel {
     pub local_port: u16,
+    /// Credentials the local SOCKS5 listener requires. Set for a SOCKS5
+    /// tunnel on the russh backend only: OpenSSH's `-D` listener cannot
+    /// authenticate clients.
+    pub socks5_credentials: Option<crate::ssh_socks5::Credentials>,
+    /// Unique per opened tunnel, so a tunnel replaced under the same cache
+    /// key can be told apart from the one a connection used.
+    pub generation: u64,
     backend: TunnelBackend,
+}
+
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+fn next_generation() -> u64 {
+    NEXT_GENERATION.fetch_add(1, Ordering::Relaxed)
 }
 
 pub static TUNNELS: OnceLock<Mutex<HashMap<String, SshTunnel>>> = OnceLock::new();
@@ -111,7 +150,7 @@ impl SshTunnel {
         remote_host: &str,
         remote_port: u16,
     ) -> Result<Self, String> {
-        Self::new_with_tcp_override(
+        Self::new_with_askpass(
             ssh_host,
             ssh_port,
             ssh_user,
@@ -123,13 +162,16 @@ impl SshTunnel {
             remote_port,
             None,
             None,
+            None,
         )
     }
 
-    /// Like [`Self::new`], but optionally dials `tcp_host:tcp_port` instead of
-    /// `ssh_host:ssh_port` (used when an HTTP/SOCKS proxy forward is in front
-    /// of the bastion). Host-key checks still use the logical `ssh_host`.
-    pub fn new_with_tcp_override(
+    /// Like [`Self::new`], but with an optional askpass bridge for interactive
+    /// passphrase prompts and an optional `tcp_host:tcp_port` to dial instead
+    /// of `ssh_host:ssh_port` (used when an HTTP/SOCKS proxy forward is in
+    /// front of the bastion). Host-key checks still use the logical `ssh_host`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_askpass(
         ssh_host: &str,
         ssh_port: u16,
         ssh_user: &str,
@@ -139,15 +181,59 @@ impl SshTunnel {
         ssh_allow_passphrase_prompt: bool,
         remote_host: &str,
         remote_port: u16,
+        askpass_server: Option<crate::askpass::AskpassServer>,
         tcp_host: Option<&str>,
         tcp_port: Option<u16>,
     ) -> Result<Self, String> {
-        let use_system_ssh = should_use_system_ssh(ssh_password);
+        Self::new_with_target(
+            ssh_host,
+            ssh_port,
+            ssh_user,
+            ssh_password,
+            ssh_key_file,
+            ssh_key_passphrase,
+            ssh_allow_passphrase_prompt,
+            ForwardTarget::Fixed {
+                host: remote_host.to_string(),
+                port: remote_port,
+            },
+            askpass_server,
+            tcp_host,
+            tcp_port,
+        )
+    }
+
+    /// Like [`Self::new_with_askpass`], but forwards to `target`: one fixed
+    /// destination (`ssh -L`), a remote Unix socket (`ssh -L <port>:<path>`),
+    /// or a SOCKS5 proxy (`ssh -D`) for drivers that declare the `socks5_proxy`
+    /// capability.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_target(
+        ssh_host: &str,
+        ssh_port: u16,
+        ssh_user: &str,
+        ssh_password: Option<&str>,
+        ssh_key_file: Option<&str>,
+        ssh_key_passphrase: Option<&str>,
+        ssh_allow_passphrase_prompt: bool,
+        target: ForwardTarget,
+        askpass_server: Option<crate::askpass::AskpassServer>,
+        tcp_host: Option<&str>,
+        tcp_port: Option<u16>,
+    ) -> Result<Self, String> {
+        let use_system_ssh = should_use_system_ssh(ssh_password, ssh_key_file);
         let connect_host = tcp_host.unwrap_or(ssh_host);
         let connect_port = tcp_port.unwrap_or(ssh_port);
         eprintln!(
-            "[SSH Tunnel] New Request: Host={}, Port={}, Connect={}:{}, User={}, UseSystemSSH={}, AllowPrompt={}",
-            ssh_host, ssh_port, connect_host, connect_port, ssh_user, use_system_ssh, ssh_allow_passphrase_prompt
+            "[SSH Tunnel] New Request: Host={}, Port={}, Connect={}:{}, User={}, Destination={}, UseSystemSSH={}, AllowPrompt={}",
+            ssh_host,
+            ssh_port,
+            connect_host,
+            connect_port,
+            ssh_user,
+            target.log_description(),
+            use_system_ssh,
+            ssh_allow_passphrase_prompt
         );
 
         let local_port = {
@@ -161,22 +247,48 @@ impl SshTunnel {
         eprintln!("[SSH Tunnel] Assigned Local Port: {}", local_port);
 
         if use_system_ssh {
-            Self::new_system_ssh(
+            match Self::new_system_ssh(
                 ssh_host,
                 ssh_port,
                 ssh_user,
+                ssh_password,
                 ssh_key_file,
+                ssh_key_passphrase,
                 ssh_allow_passphrase_prompt,
-                remote_host,
-                remote_port,
+                &target,
                 local_port,
+                askpass_server,
                 connect_host,
                 connect_port,
-            )
-            .map_err(|e| {
-                eprintln!("[SSH Tunnel Error] System SSH failed: {}", e);
-                e
-            })
+            ) {
+                Ok(tunnel) => Ok(tunnel),
+                Err(e) if should_fall_back_to_russh(&e, ssh_password, ssh_key_passphrase) => {
+                    eprintln!(
+                        "[SSH Tunnel] In-app askpass unavailable ({}); using russh for the supplied credentials",
+                        e
+                    );
+                    Self::new_russh(
+                        ssh_host,
+                        ssh_port,
+                        ssh_user,
+                        ssh_password,
+                        ssh_key_file,
+                        ssh_key_passphrase,
+                        target.clone(),
+                        local_port,
+                        connect_host,
+                        connect_port,
+                    )
+                    .map_err(|err| {
+                        eprintln!("[SSH Tunnel Error] Russh failed: {}", err);
+                        err
+                    })
+                }
+                Err(e) => {
+                    eprintln!("[SSH Tunnel Error] System SSH failed: {}", e);
+                    Err(e)
+                }
+            }
         } else {
             Self::new_russh(
                 ssh_host,
@@ -185,8 +297,7 @@ impl SshTunnel {
                 ssh_password,
                 ssh_key_file,
                 ssh_key_passphrase,
-                remote_host,
-                remote_port,
+                target,
                 local_port,
                 connect_host,
                 connect_port,
@@ -202,11 +313,13 @@ impl SshTunnel {
         ssh_host: &str,
         ssh_port: u16,
         ssh_user: &str,
+        ssh_password: Option<&str>,
         ssh_key_file: Option<&str>,
+        ssh_key_passphrase: Option<&str>,
         ssh_allow_passphrase_prompt: bool,
-        remote_host: &str,
-        remote_port: u16,
+        target: &ForwardTarget,
         local_port: u16,
+        askpass_server: Option<crate::askpass::AskpassServer>,
         connect_host: &str,
         connect_port: u16,
     ) -> Result<Self, String> {
@@ -216,11 +329,8 @@ impl SshTunnel {
         args.push("-v".to_string());
 
         args.push("-N".to_string());
-        args.push("-L".to_string());
-        args.push(format!(
-            "127.0.0.1:{}:{}:{}",
-            local_port, remote_host, remote_port
-        ));
+        args.extend(forward_args(target, local_port));
+        args.extend(keepalive_args());
 
         let via_proxy_forward = connect_host != ssh_host || connect_port != ssh_port;
         let destination = if !ssh_user.trim().is_empty() {
@@ -241,19 +351,19 @@ impl SshTunnel {
             args.push(format!("HostKeyAlias={}", ssh_host));
         }
 
-        if let Some(key) = ssh_key_file.filter(|k| !k.trim().is_empty()) {
-            args.push("-i".to_string());
-            args.push(key.to_string());
-        }
+        push_identity_args(&mut args, ssh_key_file);
 
         args.push("-o".to_string());
         args.push("StrictHostKeyChecking=accept-new".to_string());
         args.push("-o".to_string());
-        if ssh_allow_passphrase_prompt {
-            args.push("BatchMode=no".to_string());
-        } else {
-            args.push("BatchMode=yes".to_string());
-        }
+        args.push(
+            batch_mode_arg(
+                ssh_allow_passphrase_prompt,
+                ssh_password,
+                ssh_key_passphrase,
+            )
+            .to_string(),
+        );
 
         args.push(destination);
 
@@ -265,7 +375,14 @@ impl SshTunnel {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let askpass_server = configure_askpass(&mut command, ssh_allow_passphrase_prompt)?;
+        let askpass_server = configure_askpass(
+            &mut command,
+            ssh_allow_passphrase_prompt,
+            ssh_password,
+            ssh_key_file,
+            ssh_key_passphrase,
+            askpass_server,
+        )?;
 
         let mut child = command.spawn().map_err(|e| {
             let err = format!(
@@ -373,6 +490,8 @@ impl SshTunnel {
 
         Ok(Self {
             local_port,
+            socks5_credentials: None,
+            generation: next_generation(),
             backend: TunnelBackend::SystemSsh(child_arc),
         })
     }
@@ -384,8 +503,7 @@ impl SshTunnel {
         ssh_password: Option<&str>,
         ssh_key_file: Option<&str>,
         ssh_key_passphrase: Option<&str>,
-        remote_host: &str,
-        remote_port: u16,
+        target: ForwardTarget,
         local_port: u16,
         connect_host: &str,
         connect_port: u16,
@@ -408,13 +526,16 @@ impl SshTunnel {
 
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
+        let running_thread = running.clone();
         let ssh_host = ssh_host.to_string();
         let ssh_user = ssh_user.to_string();
         let ssh_password = ssh_password.map(|p| p.to_string());
         let ssh_key_file = ssh_key_file.map(|p| p.to_string());
         let ssh_key_passphrase = ssh_key_passphrase.map(|p| p.to_string());
-        let remote_host = remote_host.to_string();
         let connect_host = connect_host.to_string();
+        let socks5_credentials =
+            (target == ForwardTarget::Socks5).then(crate::ssh_socks5::Credentials::generate);
+        let listener_credentials = socks5_credentials.clone().map(Arc::new);
 
         let (ready_tx, ready_rx) = mpsc::channel();
 
@@ -431,7 +552,7 @@ impl SshTunnel {
 
             let ready_tx_inner = ready_tx.clone();
             let result = runtime.block_on(async move {
-                let config = Arc::new(client::Config::default());
+                let config = Arc::new(tunnel_client_config());
                 let addr = format!("{}:{}", connect_host, connect_port);
 
                 let mut handle = client::connect(
@@ -445,58 +566,23 @@ impl SshTunnel {
                 .await
                 .map_err(|e| format!("Failed to connect to SSH server: {}", e))?;
 
-                let authenticated = if let Some(key_path) =
-                    ssh_key_file.as_deref().filter(|p| !p.trim().is_empty())
-                {
-                    eprintln!("[SSH Tunnel] Authenticating with key file: {}", key_path);
-                    let passphrase = ssh_key_passphrase
-                        .as_deref()
-                        .filter(|p| !p.trim().is_empty());
-                    let key = russh_keys::load_secret_key(Path::new(key_path), passphrase)
-                        .map_err(|e| format!("SSH key auth failed: {}", e))?;
-
-                    tokio::time::timeout(
-                        Duration::from_secs(SSH_AUTH_TIMEOUT_SECS),
-                        handle.authenticate_publickey(&ssh_user, Arc::new(key)),
+                let authenticated = tokio::time::timeout(
+                    Duration::from_secs(SSH_AUTH_TIMEOUT_SECS),
+                    authenticate_handle(
+                        &mut handle,
+                        &ssh_user,
+                        ssh_password.as_deref(),
+                        ssh_key_file.as_deref(),
+                        ssh_key_passphrase.as_deref(),
+                    ),
+                )
+                .await
+                .map_err(|_| {
+                    format!(
+                        "SSH authentication timed out after {} seconds",
+                        SSH_AUTH_TIMEOUT_SECS
                     )
-                    .await
-                    .map_err(|_| {
-                        format!(
-                            "SSH key authentication timed out after {} seconds",
-                            SSH_AUTH_TIMEOUT_SECS
-                        )
-                    })?
-                    .map_err(|e| format!("SSH key auth failed: {}", e))?
-                } else if let Some(pwd) = ssh_password.as_deref() {
-                    eprintln!(
-                        "[SSH Tunnel] Authenticating with password (length: {})",
-                        pwd.len()
-                    );
-
-                    let auth_result = tokio::time::timeout(
-                        Duration::from_secs(SSH_AUTH_TIMEOUT_SECS),
-                        handle.authenticate_password(&ssh_user, pwd),
-                    )
-                    .await
-                    .map_err(|_| {
-                        format!(
-                            "SSH password authentication timed out after {} seconds",
-                            SSH_AUTH_TIMEOUT_SECS
-                        )
-                    })?
-                    .map_err(|e| format!("SSH password auth failed: {}", e))?;
-
-                    eprintln!(
-                        "[SSH Tunnel] Password authentication result: {}",
-                        auth_result
-                    );
-                    auth_result
-                } else {
-                    let err = "No SSH credentials provided for russh".to_string();
-                    eprintln!("[SSH Tunnel Error] {}", err);
-                    let _ = ready_tx_inner.send(Err(err.clone()));
-                    return Err(err);
-                };
+                })??;
 
                 if !authenticated {
                     let err = "SSH authentication failed (authenticated=false)".to_string();
@@ -510,13 +596,23 @@ impl SshTunnel {
                 let listener = tokio::net::TcpListener::from_std(listener)
                     .map_err(|e| format!("Failed to configure async listener: {}", e))?;
 
-                let handle = Arc::new(TokioMutex::new(handle));
+                // Channel opens only borrow the handle, so connections open
+                // concurrently: a destination sshd is slow to reach must not
+                // hold up the others sharing the tunnel.
+                let handle = Arc::new(handle);
 
                 eprintln!("[SSH Tunnel] Tunnel is ready, sending success signal");
                 let _ = ready_tx_inner.send(Ok(()));
 
                 eprintln!("[SSH Tunnel] Starting tunnel forwarding loop");
                 while running_clone.load(Ordering::Relaxed) {
+                    // Once the SSH session is gone, every new channel fails, so
+                    // stop forwarding and let `is_alive` report the tunnel dead.
+                    if handle.is_closed() {
+                        eprintln!("[SSH Tunnel] SSH session closed, stopping tunnel");
+                        break;
+                    }
+
                     let accept = tokio::time::timeout(
                         Duration::from_millis(SSH_ACCEPT_POLL_MS),
                         listener.accept(),
@@ -536,27 +632,102 @@ impl SshTunnel {
                     };
 
                     let handle = handle.clone();
-                    let r_host = remote_host.clone();
+                    let target = target.clone();
+                    let credentials = listener_credentials.clone();
                     tokio::spawn(async move {
-                        let handle = handle.lock().await;
-                        let channel = match handle
-                            .channel_open_direct_tcpip(
-                                r_host,
-                                u32::from(remote_port),
-                                "127.0.0.1",
-                                0,
-                            )
-                            .await
-                        {
+                        let mut stream = stream;
+                        let socks5 = target == ForwardTarget::Socks5;
+                        let (channel_result, target_desc) = match (target, credentials) {
+                            (ForwardTarget::Fixed { host, port }, _) => {
+                                let desc = format!("{}:{}", host, port);
+                                let res = handle
+                                    .channel_open_direct_tcpip(
+                                        host.as_str(),
+                                        u32::from(port),
+                                        "127.0.0.1",
+                                        0,
+                                    )
+                                    .await;
+                                (res, desc)
+                            }
+                            (ForwardTarget::UnixSocket { path }, _) => {
+                                let res =
+                                    handle.channel_open_direct_streamlocal(path.as_str()).await;
+                                (res, path)
+                            }
+                            (ForwardTarget::Socks5, None) => return,
+                            (ForwardTarget::Socks5, Some(credentials)) => {
+                                let request = tokio::time::timeout(
+                                    Duration::from_secs(SSH_TUNNEL_TIMEOUT_SECS),
+                                    crate::ssh_socks5::read_connect_request(
+                                        &mut stream,
+                                        &credentials,
+                                    ),
+                                )
+                                .await
+                                .unwrap_or_else(|_| {
+                                    Err(crate::ssh_socks5::HandshakeError::Protocol(
+                                        "handshake timed out".to_string(),
+                                    ))
+                                });
+                                let (r_host, r_port) = match request {
+                                    Ok(destination) => {
+                                        log::debug!(
+                                            "[SSH Tunnel] SOCKS5 CONNECT {}:{}",
+                                            destination.0,
+                                            destination.1
+                                        );
+                                        destination
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[SSH Tunnel Error] {}", e);
+                                        return;
+                                    }
+                                };
+                                let desc = format!("{}:{}", r_host, r_port);
+                                let res = handle
+                                    .channel_open_direct_tcpip(
+                                        r_host.as_str(),
+                                        u32::from(r_port),
+                                        "127.0.0.1",
+                                        0,
+                                    )
+                                    .await;
+                                (res, desc)
+                            }
+                        };
+
+                        let channel = match channel_result {
                             Ok(c) => c,
                             Err(e) => {
-                                eprintln!("[SSH Tunnel Error] Failed to open SSH channel: {}", e);
+                                eprintln!(
+                                    "[SSH Tunnel Error] Failed to open SSH channel to {}: {}",
+                                    target_desc, e
+                                );
+                                if socks5 {
+                                    let _ = crate::ssh_socks5::send_reply(
+                                        &mut stream,
+                                        crate::ssh_socks5::Reply::HostUnreachable,
+                                    )
+                                    .await;
+                                }
                                 return;
                             }
                         };
                         drop(handle);
 
-                        let mut stream = stream;
+                        if socks5 {
+                            if let Err(e) = crate::ssh_socks5::send_reply(
+                                &mut stream,
+                                crate::ssh_socks5::Reply::Succeeded,
+                            )
+                            .await
+                            {
+                                eprintln!("[SSH Tunnel Error] SOCKS5 reply failed: {}", e);
+                                return;
+                            }
+                        }
+
                         let mut channel_stream = channel.into_stream();
                         if let Err(e) = copy_bidirectional(&mut stream, &mut channel_stream).await {
                             eprintln!("[SSH Tunnel Error] Forwarding failed: {}", e);
@@ -567,6 +738,9 @@ impl SshTunnel {
                 Ok(())
             });
 
+            // The forwarding loop has ended, whether stopped, closed or failed.
+            running_thread.store(false, Ordering::Relaxed);
+
             if let Err(err) = result {
                 let _ = ready_tx.send(Err(err));
             }
@@ -575,6 +749,8 @@ impl SshTunnel {
         match ready_rx.recv_timeout(Duration::from_secs(SSH_TUNNEL_TIMEOUT_SECS)) {
             Ok(Ok(())) => Ok(Self {
                 local_port,
+                socks5_credentials,
+                generation: next_generation(),
                 backend: TunnelBackend::Russh(running),
             }),
             Ok(Err(err)) => Err(err),
@@ -582,6 +758,18 @@ impl SshTunnel {
                 "Timed out waiting for Russh tunnel to initialize ({}s)",
                 SSH_TUNNEL_TIMEOUT_SECS
             )),
+        }
+    }
+
+    /// Whether the tunnel can still forward connections.
+    ///
+    /// A cached tunnel goes stale when its SSH session ends (the bastion went
+    /// away, the `ssh` process exited), so reuse has to check this rather than
+    /// trust the map.
+    pub fn is_alive(&self) -> bool {
+        match &self.backend {
+            TunnelBackend::Russh(running) => running.load(Ordering::Relaxed),
+            TunnelBackend::SystemSsh(child) => is_child_running(child),
         }
     }
 
@@ -596,6 +784,31 @@ impl SshTunnel {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+impl SshTunnel {
+    /// A russh tunnel with no session behind it, for cache tests.
+    pub(crate) fn russh_for_test(
+        local_port: u16,
+        running: bool,
+        socks5_credentials: Option<crate::ssh_socks5::Credentials>,
+    ) -> Self {
+        Self {
+            local_port,
+            socks5_credentials,
+            generation: next_generation(),
+            backend: TunnelBackend::Russh(Arc::new(AtomicBool::new(running))),
+        }
+    }
+}
+
+/// Whether the `ssh` child process behind a system SSH tunnel is still running.
+fn is_child_running(child: &Mutex<Child>) -> bool {
+    match child.lock() {
+        Ok(mut c) => matches!(c.try_wait(), Ok(None)),
+        Err(_) => false,
     }
 }
 
@@ -619,20 +832,61 @@ pub fn test_ssh_connection(
     ssh_key_passphrase: Option<&str>,
     ssh_allow_passphrase_prompt: bool,
 ) -> Result<String, String> {
-    let use_system_ssh = should_use_system_ssh(ssh_password);
+    test_ssh_connection_with_askpass(
+        ssh_host,
+        ssh_port,
+        ssh_user,
+        ssh_password,
+        ssh_key_file,
+        ssh_key_passphrase,
+        ssh_allow_passphrase_prompt,
+        None,
+    )
+}
+
+pub fn test_ssh_connection_with_askpass(
+    ssh_host: &str,
+    ssh_port: u16,
+    ssh_user: &str,
+    ssh_password: Option<&str>,
+    ssh_key_file: Option<&str>,
+    ssh_key_passphrase: Option<&str>,
+    ssh_allow_passphrase_prompt: bool,
+    askpass_server: Option<crate::askpass::AskpassServer>,
+) -> Result<String, String> {
+    let use_system_ssh = should_use_system_ssh(ssh_password, ssh_key_file);
     eprintln!(
         "[SSH Test] Testing connection to {}:{} as {} (UseSystemSSH={}, AllowPrompt={})",
         ssh_host, ssh_port, ssh_user, use_system_ssh, ssh_allow_passphrase_prompt
     );
 
     if use_system_ssh {
-        test_ssh_connection_system(
+        match test_ssh_connection_system(
             ssh_host,
             ssh_port,
             ssh_user,
+            ssh_password,
             ssh_key_file,
+            ssh_key_passphrase,
             ssh_allow_passphrase_prompt,
-        )
+            askpass_server,
+        ) {
+            Err(e) if should_fall_back_to_russh(&e, ssh_password, ssh_key_passphrase) => {
+                eprintln!(
+                    "[SSH Test] In-app askpass unavailable ({}); using russh for the supplied credentials",
+                    e
+                );
+                test_ssh_connection_russh(
+                    ssh_host,
+                    ssh_port,
+                    ssh_user,
+                    ssh_password,
+                    ssh_key_file,
+                    ssh_key_passphrase,
+                )
+            }
+            other => other,
+        }
     } else {
         test_ssh_connection_russh(
             ssh_host,
@@ -650,8 +904,11 @@ fn test_ssh_connection_system(
     ssh_host: &str,
     ssh_port: u16,
     ssh_user: &str,
+    ssh_password: Option<&str>,
     ssh_key_file: Option<&str>,
+    ssh_key_passphrase: Option<&str>,
     ssh_allow_passphrase_prompt: bool,
+    askpass_server: Option<crate::askpass::AskpassServer>,
 ) -> Result<String, String> {
     eprintln!("[SSH Test] Using system SSH (supports ~/.ssh/config)");
 
@@ -659,14 +916,14 @@ fn test_ssh_connection_system(
     let port_string = ssh_port.to_string();
     let destination = format!("{}@{}", ssh_user, ssh_host);
 
-    let mut args = Vec::with_capacity(12);
+    let mut args = Vec::with_capacity(16);
     args.extend([
         "-o",
-        if ssh_allow_passphrase_prompt {
-            "BatchMode=no"
-        } else {
-            "BatchMode=yes"
-        },
+        batch_mode_arg(
+            ssh_allow_passphrase_prompt,
+            ssh_password,
+            ssh_key_passphrase,
+        ),
         "-o",
         "ConnectTimeout=10",
         "-o",
@@ -679,6 +936,8 @@ fn test_ssh_connection_system(
     }
 
     if let Some(key) = ssh_key_file.filter(|k| !k.trim().is_empty()) {
+        args.push("-o");
+        args.push("IdentitiesOnly=yes");
         args.push("-i");
         args.push(key);
     }
@@ -693,7 +952,14 @@ fn test_ssh_connection_system(
 
     // Keep the askpass server alive while ssh runs: prompts can arrive at any
     // point until the process exits.
-    let _askpass_server = configure_askpass(&mut command, ssh_allow_passphrase_prompt)?;
+    let _askpass_server = configure_askpass(
+        &mut command,
+        ssh_allow_passphrase_prompt,
+        ssh_password,
+        ssh_key_file,
+        ssh_key_passphrase,
+        askpass_server,
+    )?;
 
     let output = command.output().map_err(|e| {
         format!(
@@ -743,26 +1009,14 @@ async fn test_ssh_connection_russh_async(
         )
     })?;
 
-    let authenticated = if let Some(key_path) = ssh_key_file.filter(|p| !p.trim().is_empty()) {
-        eprintln!("[SSH Test] Authenticating with key file: {}", key_path);
-        // Don't filter empty passphrase - if provided, use it even if empty
-        let key = russh_keys::load_secret_key(Path::new(key_path), ssh_key_passphrase)
-            .map_err(|e| format!("SSH key authentication failed: {}", e))?;
-        handle
-            .authenticate_publickey(ssh_user, Arc::new(key))
-            .await
-            .map_err(|e| format!("SSH key authentication failed: {}", e))?
-    } else if let Some(pwd) = ssh_password {
-        eprintln!("[SSH Test] Authenticating with password");
-        handle
-            .authenticate_password(ssh_user, pwd)
-            .await
-            .map_err(|e| format!("SSH password authentication failed: {}", e))?
-    } else {
-        let err = "No SSH credentials provided for russh".to_string();
-        eprintln!("[SSH Test Error] {}", err);
-        return Err(err);
-    };
+    let authenticated = authenticate_handle(
+        &mut handle,
+        ssh_user,
+        ssh_password,
+        ssh_key_file,
+        ssh_key_passphrase,
+    )
+    .await?;
 
     if !authenticated {
         let err = "SSH authentication failed".to_string();
@@ -813,18 +1067,74 @@ fn test_ssh_connection_russh(
     .map_err(|e| format!("Thread panicked: {:?}", e))?
 }
 
-/// When passphrase/PIN prompts are allowed, wire ssh's askpass machinery to
-/// the in-app prompt bridge (see the `askpass` module). Falls back to the
-/// system askpass helper when the app is not fully initialised (e.g. tests),
-/// preserving the plain `SSH_ASKPASS_REQUIRE=force` behaviour.
+const ASKPASS_UNAVAILABLE_PREFIX: &str = "Could not start the in-app SSH prompt";
+
+/// Offer only the selected private key. Without this, OpenSSH also tries
+/// agent and default identities, and a passphrase-protected key is never the
+/// one the server accepts.
+fn push_identity_args(args: &mut Vec<String>, ssh_key_file: Option<&str>) {
+    if let Some(key) = ssh_key_file.filter(|k| !k.trim().is_empty()) {
+        args.push("-o".to_string());
+        args.push("IdentitiesOnly=yes".to_string());
+        args.push("-i".to_string());
+        args.push(key.to_string());
+    }
+}
+
+fn batch_mode_arg(
+    allow_prompt: bool,
+    ssh_password: Option<&str>,
+    ssh_key_passphrase: Option<&str>,
+) -> &'static str {
+    if allow_prompt || has_injected_secret(ssh_password, ssh_key_passphrase) {
+        "BatchMode=no"
+    } else {
+        "BatchMode=yes"
+    }
+}
+
+fn has_injected_secret(ssh_password: Option<&str>, ssh_key_passphrase: Option<&str>) -> bool {
+    !is_empty_or_whitespace(ssh_password) || !is_empty_or_whitespace(ssh_key_passphrase)
+}
+
+fn should_fall_back_to_russh(
+    err: &str,
+    ssh_password: Option<&str>,
+    ssh_key_passphrase: Option<&str>,
+) -> bool {
+    err.starts_with(ASKPASS_UNAVAILABLE_PREFIX)
+        && has_injected_secret(ssh_password, ssh_key_passphrase)
+}
+
+/// Wire ssh's askpass machinery to the in-app prompt bridge. Stored secrets are
+/// returned for matching prompts even when the user did not opt into a modal.
+/// A failure here is returned to the caller: forcing `SSH_ASKPASS_REQUIRE`
+/// without `SSH_ASKPASS` makes macOS OpenSSH exec `/usr/X11R6/bin/ssh-askpass`,
+/// which is not installed.
 fn configure_askpass(
     command: &mut Command,
     ssh_allow_passphrase_prompt: bool,
+    ssh_password: Option<&str>,
+    ssh_key_file: Option<&str>,
+    ssh_key_passphrase: Option<&str>,
+    askpass_server: Option<crate::askpass::AskpassServer>,
 ) -> Result<Option<crate::askpass::AskpassServer>, String> {
-    if !ssh_allow_passphrase_prompt {
+    let password = ssh_password.filter(|p| !p.trim().is_empty());
+    let key_passphrase = ssh_key_passphrase.filter(|p| !p.trim().is_empty());
+    let key_path = ssh_key_file.filter(|p| !p.trim().is_empty());
+    if !ssh_allow_passphrase_prompt && password.is_none() && key_passphrase.is_none() {
         return Ok(None);
     }
-    match crate::askpass::start_frontend_server() {
+    let options = crate::askpass::AskpassOptions {
+        password: password.map(str::to_string),
+        key_passphrase: key_passphrase.map(str::to_string),
+        key_path: key_path.map(str::to_string),
+        allow_ui: ssh_allow_passphrase_prompt,
+    };
+    let server = askpass_server
+        .map(Ok)
+        .unwrap_or_else(|| crate::askpass::start_frontend_server_with(options));
+    match server {
         Ok(server) => {
             server.configure_command(command)?;
             eprintln!(
@@ -833,15 +1143,160 @@ fn configure_askpass(
             );
             Ok(Some(server))
         }
-        Err(e) => {
-            eprintln!(
-                "[SSH Tunnel] In-app askpass unavailable ({}); falling back to system askpass",
-                e
-            );
-            command.env("SSH_ASKPASS_REQUIRE", "force");
-            Ok(None)
+        Err(e) => Err(format!(
+            "{ASKPASS_UNAVAILABLE_PREFIX} ({e}). Tabularis supplies this prompt itself; \
+             a system askpass program such as /usr/X11R6/bin/ssh-askpass is not required."
+        )),
+    }
+}
+
+/// Authenticate with the selected key when one is set, then with the account
+/// password. Password auth also tries keyboard-interactive, which is what many
+/// OpenSSH servers offer instead of the password method.
+async fn authenticate_handle(
+    handle: &mut client::Handle<RusshClientHandler>,
+    ssh_user: &str,
+    ssh_password: Option<&str>,
+    ssh_key_file: Option<&str>,
+    ssh_key_passphrase: Option<&str>,
+) -> Result<bool, String> {
+    let password = ssh_password.filter(|p| !p.trim().is_empty());
+    let passphrase = ssh_key_passphrase.filter(|p| !p.trim().is_empty());
+
+    if let Some(key_path) = ssh_key_file.filter(|p| !p.trim().is_empty()) {
+        eprintln!("[SSH] Authenticating with key file: {}", key_path);
+        match russh_keys::load_secret_key(Path::new(key_path), passphrase) {
+            Ok(key) => {
+                let ok = handle
+                    .authenticate_publickey(ssh_user, Arc::new(key))
+                    .await
+                    .map_err(|e| format!("SSH key authentication failed: {}", e))?;
+                if ok {
+                    return Ok(true);
+                }
+                if password.is_none() {
+                    return Ok(false);
+                }
+                eprintln!("[SSH] Selected key was rejected; trying account password");
+            }
+            Err(e) => {
+                if password.is_none() {
+                    return Err(format!("SSH key authentication failed: {}", e));
+                }
+                eprintln!(
+                    "[SSH] Could not use selected key ({}); trying account password",
+                    e
+                );
+            }
         }
     }
+
+    if let Some(password) = password {
+        eprintln!(
+            "[SSH] Authenticating with password (length: {})",
+            password.len()
+        );
+        return authenticate_password(handle, ssh_user, password).await;
+    }
+
+    let err = "No SSH credentials provided for russh".to_string();
+    eprintln!("[SSH Tunnel Error] {}", err);
+    Err(err)
+}
+
+async fn authenticate_password(
+    handle: &mut client::Handle<RusshClientHandler>,
+    ssh_user: &str,
+    password: &str,
+) -> Result<bool, String> {
+    let ok = handle
+        .authenticate_password(ssh_user, password)
+        .await
+        .map_err(|e| format!("SSH password authentication failed: {}", e))?;
+    if ok {
+        return Ok(true);
+    }
+
+    eprintln!("[SSH] Password method rejected; trying keyboard-interactive");
+    use russh::client::KeyboardInteractiveAuthResponse;
+    let mut pending = handle
+        .authenticate_keyboard_interactive_start(ssh_user, None::<String>)
+        .await
+        .map_err(|e| format!("SSH password authentication failed: {}", e))?;
+    for _ in 0..8 {
+        match pending {
+            KeyboardInteractiveAuthResponse::Success => return Ok(true),
+            KeyboardInteractiveAuthResponse::Failure => return Ok(false),
+            KeyboardInteractiveAuthResponse::InfoRequest { prompts, .. } => {
+                if !prompts
+                    .iter()
+                    .any(|prompt| prompt.prompt.to_ascii_lowercase().contains("password"))
+                {
+                    return Ok(false);
+                }
+                let answers = prompts
+                    .iter()
+                    .map(|prompt| password_for_prompt(&prompt.prompt, password))
+                    .collect();
+                pending = handle
+                    .authenticate_keyboard_interactive_respond(answers)
+                    .await
+                    .map_err(|e| format!("SSH password authentication failed: {}", e))?;
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn password_for_prompt(prompt: &str, password: &str) -> String {
+    if prompt.to_ascii_lowercase().contains("password") {
+        password.to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// `ssh` options that end the process once the server stops answering, so a
+/// silently dropped connection shows up in `is_alive` and is reopened.
+pub fn keepalive_args() -> [String; 4] {
+    [
+        "-o".to_string(),
+        format!("ServerAliveInterval={SSH_KEEPALIVE_INTERVAL_SECS}"),
+        "-o".to_string(),
+        format!("ServerAliveCountMax={SSH_KEEPALIVE_MAX}"),
+    ]
+}
+
+/// russh settings for a tunnel session; the keepalives match
+/// [`keepalive_args`].
+fn tunnel_client_config() -> client::Config {
+    client::Config {
+        keepalive_interval: Some(Duration::from_secs(SSH_KEEPALIVE_INTERVAL_SECS)),
+        keepalive_max: SSH_KEEPALIVE_MAX,
+        ..client::Config::default()
+    }
+}
+
+/// `ssh` arguments that open the local listener for `target`.
+pub fn forward_args(target: &ForwardTarget, local_port: u16) -> [String; 2] {
+    match target {
+        ForwardTarget::Fixed { host, port } => [
+            "-L".to_string(),
+            format!("127.0.0.1:{}:{}:{}", local_port, host, port),
+        ],
+        ForwardTarget::UnixSocket { path } => [
+            "-L".to_string(),
+            format!("127.0.0.1:{}:{}", local_port, path),
+        ],
+        ForwardTarget::Socks5 => ["-D".to_string(), format!("127.0.0.1:{}", local_port)],
+    }
+}
+
+/// Cache key for a SOCKS5 (dynamic forward) tunnel. Distinct from
+/// [`build_tunnel_key`], so a fixed and a dynamic tunnel through the same
+/// bastion never share an entry.
+pub fn build_socks5_tunnel_key(ssh_user: &str, ssh_host: &str, ssh_port: u16) -> String {
+    format!("{}@{}:{}->socks5", ssh_user, ssh_host, ssh_port)
 }
 
 /// Build tunnel map key from SSH parameters.
@@ -851,13 +1306,17 @@ pub fn build_tunnel_key(
     ssh_user: &str,
     ssh_host: &str,
     ssh_port: u16,
-    remote_host: &str,
-    remote_port: u16,
+    target: &ForwardTarget,
 ) -> String {
-    format!(
-        "{}@{}:{}:{}->{}",
-        ssh_user, ssh_host, ssh_port, remote_host, remote_port
-    )
+    match target {
+        ForwardTarget::Fixed { host, port } => {
+            format!("{}@{}:{}:{}->{}", ssh_user, ssh_host, ssh_port, host, port)
+        }
+        ForwardTarget::UnixSocket { path } => {
+            format!("{}@{}:{}:socket->{}", ssh_user, ssh_host, ssh_port, path)
+        }
+        ForwardTarget::Socks5 => build_socks5_tunnel_key(ssh_user, ssh_host, ssh_port),
+    }
 }
 
 /// Check if a string is empty or contains only whitespace.
@@ -866,36 +1325,186 @@ fn is_empty_or_whitespace(s: Option<&str>) -> bool {
     s.map(|p| p.trim().is_empty()).unwrap_or(true)
 }
 
-/// Determine if system SSH should be used based on password availability.
-/// System SSH with BatchMode=yes can't handle interactive password auth.
+/// System OpenSSH is used when a private key is selected, so `-i` and
+/// `IdentitiesOnly` apply that key and a stored passphrase or password can be
+/// supplied through the in-app askpass helper. Password-only auth stays on
+/// russh, which can send the password without a prompt program.
 #[inline]
-pub fn should_use_system_ssh(ssh_password: Option<&str>) -> bool {
-    is_empty_or_whitespace(ssh_password)
+pub fn should_use_system_ssh(ssh_password: Option<&str>, ssh_key_file: Option<&str>) -> bool {
+    !is_empty_or_whitespace(ssh_key_file) || is_empty_or_whitespace(ssh_password)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    mod is_alive_tests {
+        use super::*;
+
+        fn russh_tunnel(running: bool) -> SshTunnel {
+            SshTunnel::russh_for_test(0, running, None)
+        }
+
+        #[test]
+        fn test_running_russh_tunnel_is_alive() {
+            assert!(russh_tunnel(true).is_alive());
+        }
+
+        #[test]
+        fn test_russh_tunnel_whose_loop_ended_is_dead() {
+            assert!(!russh_tunnel(false).is_alive());
+        }
+
+        #[test]
+        fn test_stopped_russh_tunnel_is_dead() {
+            let tunnel = russh_tunnel(true);
+            tunnel.stop();
+            assert!(!tunnel.is_alive());
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn test_system_ssh_tunnel_follows_its_process() {
+            let child = Command::new("sleep").arg("30").spawn().unwrap();
+            let tunnel = SshTunnel {
+                local_port: 0,
+                socks5_credentials: None,
+                generation: next_generation(),
+                backend: TunnelBackend::SystemSsh(Arc::new(Mutex::new(child))),
+            };
+            assert!(tunnel.is_alive());
+
+            tunnel.stop();
+            if let TunnelBackend::SystemSsh(child) = &tunnel.backend {
+                child.lock().unwrap().wait().unwrap();
+            }
+            assert!(!tunnel.is_alive());
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn test_exited_child_is_not_running() {
+            let mut child = Command::new("true").spawn().unwrap();
+            child.wait().unwrap();
+            assert!(!is_child_running(&Mutex::new(child)));
+        }
+    }
+
     mod build_tunnel_key_tests {
         use super::*;
 
+        fn tcp(host: &str, port: u16) -> ForwardTarget {
+            ForwardTarget::Fixed {
+                host: host.to_string(),
+                port,
+            }
+        }
+
         #[test]
         fn test_basic_key_format() {
-            let key = build_tunnel_key("user", "host.example.com", 22, "db.internal", 3306);
+            let key = build_tunnel_key("user", "host.example.com", 22, &tcp("db.internal", 3306));
             assert_eq!(key, "user@host.example.com:22:db.internal->3306");
         }
 
         #[test]
         fn test_non_standard_port() {
-            let key = build_tunnel_key("admin", "jump.server", 2222, "localhost", 5432);
+            let key = build_tunnel_key("admin", "jump.server", 2222, &tcp("localhost", 5432));
             assert_eq!(key, "admin@jump.server:2222:localhost->5432");
         }
 
         #[test]
         fn test_empty_user() {
-            let key = build_tunnel_key("", "host", 22, "remote", 80);
+            let key = build_tunnel_key("", "host", 22, &tcp("remote", 80));
             assert_eq!(key, "@host:22:remote->80");
+        }
+
+        #[test]
+        fn test_unix_socket_destination() {
+            let target = ForwardTarget::UnixSocket {
+                path: "/var/run/mysqld/mysqld.sock".to_string(),
+            };
+            let key = build_tunnel_key("user", "host", 22, &target);
+            assert_eq!(key, "user@host:22:socket->/var/run/mysqld/mysqld.sock");
+        }
+
+        #[test]
+        fn test_socket_and_tcp_keys_differ() {
+            let socket = ForwardTarget::UnixSocket {
+                path: "/tmp/db.sock".to_string(),
+            };
+            assert_ne!(
+                build_tunnel_key("user", "host", 22, &socket),
+                build_tunnel_key("user", "host", 22, &tcp("/tmp/db.sock", 0))
+            );
+        }
+    }
+
+    mod forward_args_tests {
+        use super::*;
+
+        #[test]
+        fn fixed_target_is_a_local_forward() {
+            let target = ForwardTarget::Fixed {
+                host: "db.internal".to_string(),
+                port: 5432,
+            };
+            assert_eq!(
+                forward_args(&target, 40000),
+                ["-L", "127.0.0.1:40000:db.internal:5432"]
+            );
+        }
+
+        #[test]
+        fn unix_socket_target_is_a_streamlocal_forward() {
+            let target = ForwardTarget::UnixSocket {
+                path: "/var/run/postgresql/.s.PGSQL.5432".to_string(),
+            };
+            assert_eq!(
+                forward_args(&target, 15000),
+                ["-L", "127.0.0.1:15000:/var/run/postgresql/.s.PGSQL.5432"]
+            );
+        }
+
+        #[test]
+        fn socks5_target_is_a_dynamic_forward() {
+            assert_eq!(
+                forward_args(&ForwardTarget::Socks5, 40000),
+                ["-D", "127.0.0.1:40000"]
+            );
+        }
+
+        #[test]
+        fn keepalives_end_a_session_after_45_silent_seconds() {
+            assert_eq!(
+                keepalive_args(),
+                [
+                    "-o",
+                    "ServerAliveInterval=15",
+                    "-o",
+                    "ServerAliveCountMax=3"
+                ]
+            );
+            let config = tunnel_client_config();
+            assert_eq!(config.keepalive_interval, Some(Duration::from_secs(15)));
+            assert_eq!(config.keepalive_max, 3);
+        }
+
+        #[test]
+        fn socks5_key_differs_from_any_fixed_key() {
+            let socks5 = build_socks5_tunnel_key("user", "jump", 22);
+            assert_eq!(socks5, "user@jump:22->socks5");
+            assert_ne!(
+                socks5,
+                build_tunnel_key(
+                    "user",
+                    "jump",
+                    22,
+                    &ForwardTarget::Fixed {
+                        host: "localhost".to_string(),
+                        port: 27017,
+                    },
+                )
+            );
         }
     }
 
@@ -904,27 +1513,55 @@ mod tests {
 
         #[test]
         fn test_none_password_uses_system() {
-            assert!(should_use_system_ssh(None));
+            assert!(should_use_system_ssh(None, None));
         }
 
         #[test]
         fn test_empty_password_uses_system() {
-            assert!(should_use_system_ssh(Some("")));
+            assert!(should_use_system_ssh(Some(""), None));
         }
 
         #[test]
         fn test_whitespace_password_uses_system() {
-            assert!(should_use_system_ssh(Some("   ")));
+            assert!(should_use_system_ssh(Some("   "), Some("  ")));
         }
 
         #[test]
         fn test_valid_password_uses_russh() {
-            assert!(!should_use_system_ssh(Some("secret")));
+            assert!(!should_use_system_ssh(Some("secret"), None));
         }
 
         #[test]
         fn test_password_with_spaces_uses_russh() {
-            assert!(!should_use_system_ssh(Some("my password")));
+            assert!(!should_use_system_ssh(Some("my password"), None));
+        }
+
+        #[test]
+        fn test_selected_key_uses_system_ssh_even_with_password() {
+            assert!(should_use_system_ssh(
+                Some("secret"),
+                Some("/tmp/id_ed25519")
+            ));
+        }
+    }
+
+    mod ssh_command_args_tests {
+        use super::*;
+
+        #[test]
+        fn test_selected_key_is_forced() {
+            let mut args = Vec::new();
+            push_identity_args(&mut args, Some("/tmp/id_ed25519"));
+            assert_eq!(
+                args,
+                vec!["-o", "IdentitiesOnly=yes", "-i", "/tmp/id_ed25519"]
+            );
+        }
+
+        #[test]
+        fn test_stored_passphrase_disables_batch_mode() {
+            assert_eq!(batch_mode_arg(false, None, Some("secret")), "BatchMode=no");
+            assert_eq!(batch_mode_arg(false, None, None), "BatchMode=yes");
         }
     }
 
@@ -954,6 +1591,26 @@ mod tests {
         #[test]
         fn test_content_with_whitespace_is_not_empty() {
             assert!(!is_empty_or_whitespace(Some("  content  ")));
+        }
+    }
+
+    mod password_for_prompt_tests {
+        use super::*;
+
+        #[test]
+        fn test_password_prompt_returns_password() {
+            assert_eq!(
+                password_for_prompt("user@host's password: ", "account-secret"),
+                "account-secret"
+            );
+        }
+
+        #[test]
+        fn test_verification_code_is_not_answered() {
+            assert_eq!(
+                password_for_prompt("Verification code:", "account-secret"),
+                ""
+            );
         }
     }
 }

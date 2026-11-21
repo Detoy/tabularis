@@ -44,7 +44,10 @@ pub fn classify_install(installed: Option<&str>, target: &str) -> InstallAction 
     let Some(installed) = installed else {
         return InstallAction::Install;
     };
-    match (semver::Version::parse(installed), semver::Version::parse(target)) {
+    match (
+        semver::Version::parse(installed),
+        semver::Version::parse(target),
+    ) {
         (Ok(cur), Ok(tgt)) => {
             if cur < tgt {
                 InstallAction::Update
@@ -55,7 +58,8 @@ pub fn classify_install(installed: Option<&str>, target: &str) -> InstallAction 
         _ => {
             log::warn!(
                 "Non-semver version compare (installed={:?}, target={:?}); string fallback",
-                installed, target
+                installed,
+                target
             );
             if installed == target {
                 InstallAction::UpToDate
@@ -200,17 +204,24 @@ pub struct PluginReadme {
     pub repo_url: Option<String>,
 }
 
-pub fn get_current_platform() -> String {
-    let os = std::env::consts::OS;
-    let arch = std::env::consts::ARCH;
+/// Returns the registry platform key for an OS/architecture pair.
+///
+/// Kept separate from [`get_current_platform`] so every supported pair can be
+/// covered by a test without running on that platform.
+pub fn platform_key_for(os: &str, arch: &str) -> String {
     match (os, arch) {
         ("linux", "x86_64") => "linux-x64".to_string(),
         ("linux", "aarch64") => "linux-arm64".to_string(),
         ("macos", "aarch64") => "darwin-arm64".to_string(),
         ("macos", "x86_64") => "darwin-x64".to_string(),
         ("windows", "x86_64") => "win-x64".to_string(),
+        ("windows", "aarch64") => "win-arm64".to_string(),
         _ => format!("{}-{}", os, arch),
     }
+}
+
+pub fn get_current_platform() -> String {
+    platform_key_for(std::env::consts::OS, std::env::consts::ARCH)
 }
 
 /// Fetch a Tabularium-flavoured registry and adapt it to the legacy
@@ -276,24 +287,42 @@ mod tests {
 
     #[test]
     fn classify_older_installed_is_update() {
-        assert_eq!(classify_install(Some("1.0.0"), "1.2.3"), InstallAction::Update);
-        assert_eq!(classify_install(Some("0.9.0"), "0.10.0"), InstallAction::Update);
+        assert_eq!(
+            classify_install(Some("1.0.0"), "1.2.3"),
+            InstallAction::Update
+        );
+        assert_eq!(
+            classify_install(Some("0.9.0"), "0.10.0"),
+            InstallAction::Update
+        );
     }
 
     #[test]
     fn classify_equal_is_up_to_date() {
-        assert_eq!(classify_install(Some("1.2.3"), "1.2.3"), InstallAction::UpToDate);
+        assert_eq!(
+            classify_install(Some("1.2.3"), "1.2.3"),
+            InstallAction::UpToDate
+        );
     }
 
     #[test]
     fn classify_newer_installed_is_up_to_date() {
         // Downgrade link: never auto-downgrade.
-        assert_eq!(classify_install(Some("2.0.0"), "1.2.3"), InstallAction::UpToDate);
+        assert_eq!(
+            classify_install(Some("2.0.0"), "1.2.3"),
+            InstallAction::UpToDate
+        );
     }
 
     #[test]
     fn classify_unparseable_falls_back_to_string_compare() {
-        assert_eq!(classify_install(Some("weird"), "weird"), InstallAction::UpToDate);
-        assert_eq!(classify_install(Some("weird"), "other"), InstallAction::Update);
+        assert_eq!(
+            classify_install(Some("weird"), "weird"),
+            InstallAction::UpToDate
+        );
+        assert_eq!(
+            classify_install(Some("weird"), "other"),
+            InstallAction::Update
+        );
     }
 }
