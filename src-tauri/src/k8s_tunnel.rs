@@ -18,6 +18,9 @@ const LOG_BUFFER_INITIAL_CAPACITY: usize = 64;
 #[derive(Clone)]
 pub struct K8sTunnel {
     pub local_port: u16,
+    /// Unique per spawned process, so a tunnel replaced under the same cache
+    /// key can be told apart from the one a connection used.
+    pub generation: u64,
     child: Arc<Mutex<Child>>,
 }
 
@@ -273,14 +276,28 @@ impl K8sTunnel {
 
         Ok(Self {
             local_port,
+            generation: crate::ssh_tunnel::next_generation(),
             child: child_arc,
         })
     }
 
-    /// Stop the tunnel by killing the kubectl child process.
+    /// A tunnel around an already running `child`, for tests that need no
+    /// real port-forward.
+    #[cfg(test)]
+    pub(crate) fn for_test(local_port: u16, child: Child) -> Self {
+        Self {
+            local_port,
+            generation: crate::ssh_tunnel::next_generation(),
+            child: Arc::new(Mutex::new(child)),
+        }
+    }
+
+    /// Stop the tunnel by killing the kubectl child process. Waits for it to
+    /// exit, so a replacement can bind the same local port right away.
     pub fn stop(&self) {
         if let Ok(mut c) = self.child.lock() {
             let _ = c.kill();
+            let _ = c.wait();
             eprintln!("[K8s Tunnel] Stopped tunnel on port {}", self.local_port);
         }
     }
@@ -506,6 +523,17 @@ fn parse_resource_ports(output: &str) -> Vec<u16> {
         .split_whitespace()
         .filter_map(|value| value.parse::<u16>().ok())
         .collect()
+}
+
+/// Serialize every test that touches the process-wide `TUNNELS` map.
+/// `stop_all_tunnels_tests`, `reuse_or_discard_dead_tests` and the tunnel
+/// lease tests in `application::tunnels` share it: `stop_all_tunnels()`
+/// clears every entry, so separate `OnceLock`s race under
+/// `--test-threads > 1`.
+#[cfg(all(test, unix))]
+pub(crate) fn tunnels_map_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
 #[cfg(test)]

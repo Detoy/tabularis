@@ -3,7 +3,7 @@ use crate::application::connection_lifecycle::{
     HealthTracker, PingOutcome, PingVerdict, TickPing, CONNECTION_LIFECYCLE_EVENT,
     POOL_CLOSE_TIMEOUT, RECONNECT_TIMEOUT,
 };
-use crate::application::tunnels::{discard_ssh_tunnel, ssh_tunnel_lease, TunnelLease};
+use crate::application::tunnels::{discard_tunnel, tunnel_lease, TunnelLease};
 pub(crate) use crate::health_check::*;
 use std::time::{Duration, SystemTime};
 use tauri::Emitter;
@@ -76,8 +76,8 @@ pub async fn restart_ping_loop(app: tauri::AppHandle, interval_secs: u64) {
 
 /// Ping every registered connection. A connection that fails the threshold
 /// gets one reconnect attempt when auto-reconnect is on, and is dropped
-/// otherwise. A shared SSH tunnel that looks half-open is stopped first, and
-/// every connection on it is handled as failed.
+/// otherwise. A shared tunnel (SSH, Kubernetes or SSM) that looks half-open
+/// is stopped first, and every connection on it is handled as failed.
 async fn ping_all_connections(app: &tauri::AppHandle, tracker: &mut HealthTracker) {
     // Snapshot the active set so we don't hold the lock during I/O.
     let active: Vec<String> = ACTIVE_CONNECTIONS.read().await.iter().cloned().collect();
@@ -114,9 +114,9 @@ async fn ping_all_connections(app: &tauri::AppHandle, tracker: &mut HealthTracke
     });
     let mut on_discarded_tunnel = std::collections::HashSet::new();
     for discard in tunnel_discards(&tick, auto_reconnect) {
-        if discard_ssh_tunnel(&discard.lease) {
+        if discard_tunnel(&discard.lease) {
             log::warn!(
-                "Health check: discarding half-open SSH tunnel (generation {}), {} connections affected",
+                "Health check: discarding half-open tunnel (generation {}), {} connections affected",
                 discard.lease.generation,
                 discard.recover.len()
             );
@@ -231,7 +231,7 @@ fn emit_lifecycle(app: &tauri::AppHandle, connection_id: &str, lifecycle: Connec
     }
 }
 
-/// The connection's params pointing at its tunnel, and the SSH tunnel cached
+/// The connection's params pointing at its tunnel, and the tunnel cached
 /// for it before resolving. Opening a tunnel blocks, so it runs off the async
 /// workers where the callers' timeouts can bound it.
 async fn resolve_params(
@@ -248,7 +248,7 @@ async fn resolve_params(
         crate::transport::desktop::commands::expand_k8s_connection_params(app, &expanded_params)
             .await?;
     expanded_params.connection_id = Some(connection_id.to_string());
-    let lease = ssh_tunnel_lease(&expanded_params);
+    let lease = tunnel_lease(&expanded_params);
     let params = tokio::task::spawn_blocking(move || {
         crate::commands::resolve_connection_params(&expanded_params)
     })
@@ -257,7 +257,7 @@ async fn resolve_params(
     Ok((lease, params))
 }
 
-/// Ping a single connection through its existing pool. Also returns the SSH
+/// Ping a single connection through its existing pool. Also returns the
 /// tunnel that was cached for it when the ping started.
 async fn ping_single_connection(
     app: &tauri::AppHandle,

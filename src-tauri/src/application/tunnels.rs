@@ -747,16 +747,49 @@ fn ssh_tunnel_route(
     Ok((target, proxy, key))
 }
 
-/// The SSH tunnel instance a connection goes through.
+/// The cache entry of the tunnel a connection goes through.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TunnelRoute {
+    Ssh(String),
+    K8s(crate::k8s_tunnel::K8sTunnelKey),
+    Ssm(crate::ssm_tunnel::SsmTunnelKey),
+}
+
+/// The tunnel instance a connection goes through.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TunnelLease {
-    pub key: String,
+    pub route: TunnelRoute,
     pub generation: u64,
 }
 
-/// The cached SSH tunnel that expanded `params` would use right now, if any.
-pub(crate) fn ssh_tunnel_lease(params: &ConnectionParams) -> Option<TunnelLease> {
-    if !params.ssh_enabled.unwrap_or(false) || ensure_single_tunnel(params).is_err() {
+/// The cached tunnel that expanded `params` would use right now, if any.
+pub(crate) fn tunnel_lease(params: &ConnectionParams) -> Option<TunnelLease> {
+    ensure_single_tunnel(params).ok()?;
+    if params.k8s_enabled.unwrap_or(false) {
+        let key = k8s_tunnel_route(params).ok()?.key;
+        let generation = crate::k8s_tunnel::get_tunnels()
+            .lock()
+            .unwrap()
+            .get(&key)?
+            .generation;
+        return Some(TunnelLease {
+            route: TunnelRoute::K8s(key),
+            generation,
+        });
+    }
+    if params.ssm_enabled.unwrap_or(false) {
+        let (_, key) = ssm_tunnel_route(params).ok()?;
+        let generation = crate::ssm_tunnel::get_tunnels()
+            .lock()
+            .unwrap()
+            .get(&key)?
+            .generation;
+        return Some(TunnelLease {
+            route: TunnelRoute::Ssm(key),
+            generation,
+        });
+    }
+    if !params.ssh_enabled.unwrap_or(false) {
         return None;
     }
     let (_, _, key) = ssh_tunnel_route(params).ok()?;
@@ -765,20 +798,52 @@ pub(crate) fn ssh_tunnel_lease(params: &ConnectionParams) -> Option<TunnelLease>
         .unwrap()
         .get(&key)?
         .generation;
-    Some(TunnelLease { key, generation })
+    Some(TunnelLease {
+        route: TunnelRoute::Ssh(key),
+        generation,
+    })
 }
 
-/// Stops and uncaches the tunnel `lease` names. Returns false, touching
-/// nothing, when that tunnel was already replaced or removed.
-pub(crate) fn discard_ssh_tunnel(lease: &TunnelLease) -> bool {
-    let mut tunnels = crate::ssh_tunnel::get_tunnels().lock().unwrap();
-    if tunnels.get(&lease.key).map(|t| t.generation) != Some(lease.generation) {
-        return false;
+/// Stops the tunnel `lease` names, so the next resolve opens a new one.
+/// Returns false, touching nothing, when that tunnel was already replaced,
+/// removed or stopped.
+///
+/// A Kubernetes entry stays cached after its port-forward is stopped: the
+/// replacement then binds the same local port (see
+/// [`crate::k8s_tunnel::reuse_or_discard_dead`]).
+pub(crate) fn discard_tunnel(lease: &TunnelLease) -> bool {
+    match &lease.route {
+        TunnelRoute::Ssh(key) => {
+            let mut tunnels = crate::ssh_tunnel::get_tunnels().lock().unwrap();
+            if tunnels.get(key).map(|t| t.generation) != Some(lease.generation) {
+                return false;
+            }
+            if let Some(tunnel) = tunnels.remove(key) {
+                tunnel.stop();
+            }
+            true
+        }
+        TunnelRoute::K8s(key) => {
+            let tunnels = crate::k8s_tunnel::get_tunnels().lock().unwrap();
+            match tunnels.get(key) {
+                Some(t) if t.generation == lease.generation && t.is_alive() => {
+                    t.stop();
+                    true
+                }
+                _ => false,
+            }
+        }
+        TunnelRoute::Ssm(key) => {
+            let mut tunnels = crate::ssm_tunnel::get_tunnels().lock().unwrap();
+            if tunnels.get(key).map(|t| t.generation) != Some(lease.generation) {
+                return false;
+            }
+            if let Some(tunnel) = tunnels.remove(key) {
+                tunnel.stop();
+            }
+            true
+        }
     }
-    if let Some(tunnel) = tunnels.remove(&lease.key) {
-        tunnel.stop();
-    }
-    true
 }
 
 /// The cached SSH tunnel for `key`, if its session is still up. A dead one
@@ -874,23 +939,35 @@ fn without_socks5_proxy(params: &ConnectionParams) -> std::borrow::Cow<'_, Conne
     std::borrow::Cow::Owned(cleared)
 }
 
-/// Resolve AWS SSM tunnel params synchronously. Like SSH, the session forwards
-/// to the connection's own host/port; unlike SSH there is no saved-connection
-/// indirection, so every field is inline.
-pub(crate) fn resolve_ssm_params(params: &ConnectionParams) -> Result<ConnectionParams, String> {
+/// The SSM target and the cache key of the session `params` forwards through.
+fn ssm_tunnel_route(
+    params: &ConnectionParams,
+) -> Result<(&str, crate::ssm_tunnel::SsmTunnelKey), String> {
     let target = params
         .ssm_target
         .as_deref()
         .map(str::trim)
         .filter(|t| !t.is_empty())
         .ok_or("Missing AWS SSM target")?;
+    let key = crate::ssm_tunnel::build_tunnel_key(
+        target,
+        params.ssm_profile.as_deref(),
+        params.ssm_region.as_deref(),
+        params.host.as_deref().unwrap_or("localhost"),
+        params.port.unwrap_or(DEFAULT_REMOTE_PORT),
+    );
+    Ok((target, key))
+}
+
+/// Resolve AWS SSM tunnel params synchronously. Like SSH, the session forwards
+/// to the connection's own host/port; unlike SSH there is no saved-connection
+/// indirection, so every field is inline.
+pub(crate) fn resolve_ssm_params(params: &ConnectionParams) -> Result<ConnectionParams, String> {
+    let (target, map_key) = ssm_tunnel_route(params)?;
     let profile = params.ssm_profile.as_deref();
     let region = params.ssm_region.as_deref();
     let remote_host = params.host.as_deref().unwrap_or("localhost");
     let remote_port = params.port.unwrap_or(DEFAULT_REMOTE_PORT);
-
-    let map_key =
-        crate::ssm_tunnel::build_tunnel_key(target, profile, region, remote_host, remote_port);
 
     {
         let mut tunnels = crate::ssm_tunnel::get_tunnels().lock().unwrap();
@@ -971,7 +1048,18 @@ fn scoped_askpass(
     .map(Some)
 }
 
-pub(crate) fn resolve_k8s_params(params: &ConnectionParams) -> Result<ConnectionParams, String> {
+/// What `kubectl port-forward` is pointed at for `params`, and its cache key.
+struct K8sRoute<'a> {
+    context: &'a str,
+    namespace: &'a str,
+    resource_type: &'a str,
+    resource_name: &'a str,
+    port: u16,
+    options: crate::k8s_tunnel::K8sCommandOptions,
+    key: crate::k8s_tunnel::K8sTunnelKey,
+}
+
+fn k8s_tunnel_route(params: &ConnectionParams) -> Result<K8sRoute<'_>, String> {
     let context = params.k8s_context.as_deref().ok_or("Missing K8s context")?;
     let namespace = params
         .k8s_namespace
@@ -998,6 +1086,27 @@ pub(crate) fn resolve_k8s_params(params: &ConnectionParams) -> Result<Connection
         port,
         &options,
     );
+    Ok(K8sRoute {
+        context,
+        namespace,
+        resource_type,
+        resource_name,
+        port,
+        options,
+        key,
+    })
+}
+
+pub(crate) fn resolve_k8s_params(params: &ConnectionParams) -> Result<ConnectionParams, String> {
+    let K8sRoute {
+        context,
+        namespace,
+        resource_type,
+        resource_name,
+        port,
+        options,
+        key,
+    } = k8s_tunnel_route(params)?;
     let preferred_local_port = match crate::k8s_tunnel::reuse_or_discard_dead(&key) {
         Ok(local_port) => {
             let mut resolved = params.clone();

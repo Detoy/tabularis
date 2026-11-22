@@ -116,7 +116,7 @@ pub struct SshTunnel {
 
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
-fn next_generation() -> u64 {
+pub(crate) fn next_generation() -> u64 {
     NEXT_GENERATION.fetch_add(1, Ordering::Relaxed)
 }
 

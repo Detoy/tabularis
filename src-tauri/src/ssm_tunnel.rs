@@ -24,6 +24,9 @@ const DOCUMENT_REMOTE: &str = "AWS-StartPortForwardingSessionToRemoteHost";
 #[derive(Clone)]
 pub struct SsmTunnel {
     pub local_port: u16,
+    /// Unique per spawned process, so a tunnel replaced under the same cache
+    /// key can be told apart from the one a connection used.
+    pub generation: u64,
     child: Arc<Mutex<Child>>,
 }
 
@@ -430,6 +433,7 @@ impl SsmTunnel {
 
         Ok(Self {
             local_port,
+            generation: crate::ssh_tunnel::next_generation(),
             child: child_arc,
         })
     }
@@ -442,6 +446,17 @@ impl SsmTunnel {
         match self.child.lock() {
             Ok(mut c) => matches!(c.try_wait(), Ok(None)),
             Err(_) => false,
+        }
+    }
+
+    /// A tunnel around an already running `child`, for tests that need no
+    /// real port-forward.
+    #[cfg(test)]
+    pub(crate) fn for_test(local_port: u16, child: Child) -> Self {
+        Self {
+            local_port,
+            generation: crate::ssh_tunnel::next_generation(),
+            child: Arc::new(Mutex::new(child)),
         }
     }
 
