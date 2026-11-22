@@ -296,6 +296,7 @@ mod is_alive_tests {
             .unwrap();
         SsmTunnel {
             local_port: 54321,
+            generation: crate::ssh_tunnel::next_generation(),
             child: Arc::new(Mutex::new(child)),
         }
     }

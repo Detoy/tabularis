@@ -763,21 +763,27 @@ fn tunnel_params_clear_local_socket_path() {
 #[test]
 fn ssh_tunnel_lease_names_the_cached_generation() {
     let params = ssh_params("postgres", "lease-bastion", "postgres://db");
-    assert_eq!(ssh_tunnel_lease(&params), None);
+    assert_eq!(tunnel_lease(&params), None);
 
     let (_, _, key) = ssh_tunnel_route(&params).unwrap();
     let tunnel = crate::ssh_tunnel::SshTunnel::russh_for_test(41010, true, None);
     let generation = tunnel.generation;
     cache(&key, tunnel);
-    let lease = ssh_tunnel_lease(&params);
+    let lease = tunnel_lease(&params);
     forget(&key);
 
-    assert_eq!(lease, Some(TunnelLease { key, generation }));
+    assert_eq!(
+        lease,
+        Some(TunnelLease {
+            route: TunnelRoute::Ssh(key),
+            generation
+        })
+    );
     let direct = ConnectionParams {
         ssh_enabled: Some(false),
         ..params
     };
-    assert_eq!(ssh_tunnel_lease(&direct), None);
+    assert_eq!(tunnel_lease(&direct), None);
 }
 
 #[test]
@@ -785,23 +791,331 @@ fn discard_stops_only_the_leased_generation() {
     let key = "test-discard-tunnel-key";
     let old = crate::ssh_tunnel::SshTunnel::russh_for_test(41011, true, None);
     let stale = TunnelLease {
-        key: key.to_string(),
+        route: TunnelRoute::Ssh(key.to_string()),
         generation: old.generation,
     };
     cache(key, old.clone());
 
-    assert!(discard_ssh_tunnel(&stale));
+    assert!(discard_tunnel(&stale));
     assert!(!old.is_alive());
     assert_eq!(cached_port(key), None);
-    assert!(!discard_ssh_tunnel(&stale), "a second discard is a no-op");
+    assert!(!discard_tunnel(&stale), "a second discard is a no-op");
 
     let fresh = crate::ssh_tunnel::SshTunnel::russh_for_test(41012, true, None);
     assert!(fresh.generation > stale.generation);
     cache(key, fresh.clone());
-    let replaced = discard_ssh_tunnel(&stale);
+    let replaced = discard_tunnel(&stale);
     let cached = cached_port(key);
     forget(key);
     assert!(!replaced);
     assert!(fresh.is_alive());
     assert_eq!(cached, Some(41012));
+}
+
+/// A process in its own group, the way the SSM tunnel spawns `aws`, so
+/// `SsmTunnel::stop` can signal the group.
+#[cfg(unix)]
+fn sleeping_child() -> std::process::Child {
+    use std::os::unix::process::CommandExt;
+    std::process::Command::new("sh")
+        .args(["-c", "exec sleep 30"])
+        .process_group(0)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap()
+}
+
+/// Kubernetes-enabled params. Each test uses its own `context` so the
+/// process-wide port-forward cache does not leak between tests.
+fn k8s_params(context: &str, kubectl: Option<&str>) -> ConnectionParams {
+    ConnectionParams {
+        driver: "postgres".to_string(),
+        host: Some("localhost".to_string()),
+        port: Some(5432),
+        k8s_enabled: Some(true),
+        k8s_context: Some(context.to_string()),
+        k8s_namespace: Some("db".to_string()),
+        k8s_resource_type: Some("service".to_string()),
+        k8s_resource_name: Some("postgres".to_string()),
+        k8s_port: Some(5432),
+        k8s_kubectl_path: kubectl.map(str::to_string),
+        ..ConnectionParams::default()
+    }
+}
+
+fn ssm_params(target: &str) -> ConnectionParams {
+    ConnectionParams {
+        driver: "postgres".to_string(),
+        host: Some("db.internal".to_string()),
+        port: Some(5432),
+        ssm_enabled: Some(true),
+        ssm_target: Some(target.to_string()),
+        ..ConnectionParams::default()
+    }
+}
+
+fn k8s_key(params: &ConnectionParams) -> crate::k8s_tunnel::K8sTunnelKey {
+    match tunnel_route_for_test(params) {
+        TunnelRoute::K8s(key) => key,
+        other => panic!("expected a Kubernetes route, got {other:?}"),
+    }
+}
+
+/// The route `tunnel_lease` would report once a tunnel is cached.
+fn tunnel_route_for_test(params: &ConnectionParams) -> TunnelRoute {
+    if params.k8s_enabled == Some(true) {
+        return TunnelRoute::K8s(k8s_tunnel_route(params).unwrap().key);
+    }
+    TunnelRoute::Ssm(ssm_tunnel_route(params).unwrap().1)
+}
+
+#[cfg(unix)]
+#[test]
+fn tunnel_lease_names_the_cached_k8s_port_forward() {
+    let _guard = crate::k8s_tunnel::tunnels_map_lock().lock().unwrap();
+    let params = k8s_params("lease-k8s", None);
+    assert_eq!(tunnel_lease(&params), None);
+
+    let key = k8s_key(&params);
+    let tunnel = crate::k8s_tunnel::K8sTunnel::for_test(41020, sleeping_child());
+    let generation = tunnel.generation;
+    crate::k8s_tunnel::insert_tunnel(key.clone(), tunnel.clone());
+    let lease = tunnel_lease(&params);
+    crate::k8s_tunnel::get_tunnels()
+        .lock()
+        .unwrap()
+        .remove(&key);
+    tunnel.stop();
+
+    assert_eq!(
+        lease,
+        Some(TunnelLease {
+            route: TunnelRoute::K8s(key),
+            generation
+        })
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn saved_tunnel_lease_names_the_k8s_port_forward_resolving_hides() {
+    let _guard = crate::k8s_tunnel::tunnels_map_lock().lock().unwrap();
+    let (_temp, runtime) = fixture();
+    let profile = save_k8s_connection(
+        &runtime,
+        K8sConnectionInput {
+            name: "Saved lease cluster".to_string(),
+            context: "saved-lease-k8s".to_string(),
+            namespace: "db".to_string(),
+            resource_type: "service".to_string(),
+            resource_name: "postgres".to_string(),
+            port: 5432,
+            kubectl_path: None,
+            kubeconfig_path: None,
+        },
+    )
+    .unwrap();
+    let saved = ConnectionParams {
+        driver: "postgres".to_string(),
+        k8s_enabled: Some(true),
+        k8s_connection_id: Some(profile.id),
+        ..ConnectionParams::default()
+    };
+    let expanded = expand_connection_params(&runtime, &saved).unwrap();
+    let key = k8s_key(&expanded);
+    let tunnel = crate::k8s_tunnel::K8sTunnel::for_test(41025, sleeping_child());
+    let generation = tunnel.generation;
+    crate::k8s_tunnel::insert_tunnel(key.clone(), tunnel.clone());
+
+    let lease = saved_tunnel_lease(&runtime, "saved-lease", &saved);
+    let resolved = resolve_expanded_connection_params(&expanded, None);
+    crate::k8s_tunnel::get_tunnels()
+        .lock()
+        .unwrap()
+        .remove(&key);
+    tunnel.stop();
+
+    let resolved = resolved.unwrap();
+    assert_eq!(resolved.port, Some(41025));
+    assert_eq!(
+        tunnel_lease(&resolved),
+        None,
+        "resolved params no longer name the port-forward"
+    );
+    assert_eq!(
+        lease,
+        Some(TunnelLease {
+            route: TunnelRoute::K8s(key),
+            generation
+        })
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn discard_stops_a_k8s_port_forward_and_keeps_its_port() {
+    let _guard = crate::k8s_tunnel::tunnels_map_lock().lock().unwrap();
+    let key = k8s_key(&k8s_params("discard-k8s", None));
+    let tunnel = crate::k8s_tunnel::K8sTunnel::for_test(41021, sleeping_child());
+    let lease = TunnelLease {
+        route: TunnelRoute::K8s(key.clone()),
+        generation: tunnel.generation,
+    };
+    crate::k8s_tunnel::insert_tunnel(key.clone(), tunnel.clone());
+
+    let discarded = discard_tunnel(&lease);
+    let alive = tunnel.is_alive();
+    let next = crate::k8s_tunnel::reuse_or_discard_dead(&key);
+    let again = discard_tunnel(&lease);
+    crate::k8s_tunnel::get_tunnels()
+        .lock()
+        .unwrap()
+        .remove(&key);
+
+    assert!(discarded);
+    assert!(!alive, "the port-forward process is stopped");
+    assert_eq!(next, Err(Some(41021)), "the next one reuses the port");
+    assert!(!again, "a second discard is a no-op");
+}
+
+#[cfg(unix)]
+#[test]
+fn discard_leaves_a_replaced_k8s_port_forward_running() {
+    let _guard = crate::k8s_tunnel::tunnels_map_lock().lock().unwrap();
+    let key = k8s_key(&k8s_params("replaced-k8s", None));
+    let old = crate::k8s_tunnel::K8sTunnel::for_test(41022, sleeping_child());
+    let stale = TunnelLease {
+        route: TunnelRoute::K8s(key.clone()),
+        generation: old.generation,
+    };
+    old.stop();
+    let fresh = crate::k8s_tunnel::K8sTunnel::for_test(41022, sleeping_child());
+    crate::k8s_tunnel::insert_tunnel(key.clone(), fresh.clone());
+
+    let discarded = discard_tunnel(&stale);
+    let alive = fresh.is_alive();
+    crate::k8s_tunnel::get_tunnels()
+        .lock()
+        .unwrap()
+        .remove(&key);
+    fresh.stop();
+
+    assert!(!discarded);
+    assert!(alive);
+}
+
+#[cfg(unix)]
+#[test]
+fn ssm_lease_discard_stops_only_the_leased_session() {
+    let params = ssm_params("i-0lease");
+    assert_eq!(tunnel_lease(&params), None);
+    let TunnelRoute::Ssm(key) = tunnel_route_for_test(&params) else {
+        unreachable!()
+    };
+    let old = crate::ssm_tunnel::SsmTunnel::for_test(41023, sleeping_child());
+    crate::ssm_tunnel::get_tunnels()
+        .lock()
+        .unwrap()
+        .insert(key.clone(), old.clone());
+    let stale = tunnel_lease(&params).unwrap();
+    assert_eq!(stale.generation, old.generation);
+
+    assert!(discard_tunnel(&stale));
+    assert!(!crate::ssm_tunnel::get_tunnels()
+        .lock()
+        .unwrap()
+        .contains_key(&key));
+    assert!(!discard_tunnel(&stale), "a second discard is a no-op");
+
+    let fresh = crate::ssm_tunnel::SsmTunnel::for_test(41024, sleeping_child());
+    crate::ssm_tunnel::get_tunnels()
+        .lock()
+        .unwrap()
+        .insert(key.clone(), fresh.clone());
+    let replaced = discard_tunnel(&stale);
+    let alive = fresh.is_alive();
+    crate::ssm_tunnel::get_tunnels()
+        .lock()
+        .unwrap()
+        .remove(&key);
+    fresh.stop();
+    // SIGTERM to the stale session's process group is not waited for.
+    let old_ended = (0..40).any(|_| {
+        std::thread::sleep(Duration::from_millis(50));
+        !old.is_alive()
+    });
+
+    assert!(!replaced);
+    assert!(alive);
+    assert!(old_ended);
+}
+
+/// A `kubectl` whose port-forward accepts connections and never forwards a
+/// byte: what a port-forward that lost its pod looks like from the client.
+#[cfg(unix)]
+fn stuck_kubectl(dir: &std::path::Path) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("kubectl");
+    std::fs::write(
+        &path,
+        r#"#!/bin/sh
+[ "$1" = version ] && exit 0
+for arg; do spec=$arg; done
+exec python3 -c '
+import socket, sys
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", int(sys.argv[1])))
+s.listen()
+held = []
+while True:
+    held.append(s.accept()[0])
+' "${spec%%:*}"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // A process another test forks while the script is being written keeps
+    // its write handle until it execs, and exec fails with ETXTBSY until then.
+    let runnable =
+        (0..100).any(
+            |_| match std::process::Command::new(&path).arg("version").status() {
+                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+                    std::thread::sleep(Duration::from_millis(10));
+                    false
+                }
+                other => other.unwrap().success(),
+            },
+        );
+    assert!(runnable, "fake kubectl never became runnable");
+    path.to_string_lossy().into_owned()
+}
+
+#[cfg(unix)]
+#[test]
+fn a_discarded_k8s_port_forward_is_rebuilt_on_the_same_port() {
+    let _guard = crate::k8s_tunnel::tunnels_map_lock().lock().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let params = k8s_params("rebuild-k8s", Some(&stuck_kubectl(dir.path())));
+    let key = k8s_key(&params);
+
+    let first = resolve_k8s_params(&params).unwrap();
+    let lease = tunnel_lease(&params).unwrap();
+    // The process is alive, so without a discard the stuck port-forward is
+    // handed out again.
+    let reused = resolve_k8s_params(&params).unwrap();
+    assert_eq!(tunnel_lease(&params), Some(lease.clone()));
+
+    assert!(discard_tunnel(&lease));
+    let rebuilt = resolve_k8s_params(&params);
+    let after = tunnel_lease(&params);
+    crate::k8s_tunnel::stop_all_tunnels();
+
+    let rebuilt = rebuilt.unwrap();
+    assert_eq!(reused.port, first.port);
+    assert_eq!(rebuilt.port, first.port, "pools keep the same endpoint");
+    let after = after.unwrap();
+    assert_eq!(after.route, TunnelRoute::K8s(key));
+    assert_ne!(after.generation, lease.generation, "a new port-forward");
 }

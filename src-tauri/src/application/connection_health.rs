@@ -11,7 +11,7 @@ use crate::application::connection_lifecycle::{
     HealthTracker, PingOutcome, TickPing, CONNECTION_LIFECYCLE_EVENT, POOL_CLOSE_TIMEOUT,
     RECONNECT_TIMEOUT,
 };
-use crate::application::tunnels::{discard_ssh_tunnel, ssh_tunnel_lease, TunnelLease};
+use crate::application::tunnels::{discard_tunnel, saved_tunnel_lease, TunnelLease};
 use crate::health_check::{DEFAULT_PING_INTERVAL, PING_TIMEOUT};
 use crate::models::ConnectionParams;
 use crate::runtime::state::ApplicationState;
@@ -161,9 +161,9 @@ pub(crate) async fn check_connections(
     });
     let plan = plan_tick(tick, auto_reconnect, tracker);
     for discard in &plan.discards {
-        if discard_ssh_tunnel(&discard.lease) {
+        if discard_tunnel(&discard.lease) {
             log::warn!(
-                "Health check: discarding half-open SSH tunnel (generation {}), {} connections affected",
+                "Health check: discarding half-open tunnel (generation {}), {} connections affected",
                 discard.lease.generation,
                 discard.recover.len()
             );
@@ -210,7 +210,7 @@ fn take_owners(state: &ApplicationState, connection_id: &str) -> Vec<Uuid> {
     owners
 }
 
-/// The connection's SSH tunnel lease, taken before resolving, and its resolved
+/// The connection's tunnel lease, taken before resolving, and its resolved
 /// params. An SSH passphrase prompt, if resolving needs one, goes to a session
 /// that holds the connection rather than to every browser.
 fn resolve_saved(
@@ -222,12 +222,7 @@ fn resolve_saved(
         crate::application::connections::load_connections(&runtime.paths.connections_file())?
             .into_iter()
             .find(|saved| saved.id == connection_id)
-            .and_then(|saved| {
-                let mut params = saved.params;
-                params.connection_id = Some(connection_id.to_string());
-                crate::application::tunnels::expand_connection_params(runtime, &params).ok()
-            })
-            .and_then(|expanded| ssh_tunnel_lease(&expanded));
+            .and_then(|saved| saved_tunnel_lease(runtime, connection_id, &saved.params));
     let (_, params) = crate::application::connections::resolve_saved_connection_params(
         runtime,
         owner,

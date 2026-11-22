@@ -139,7 +139,7 @@ impl PingOutcome {
     }
 }
 
-/// One connection's ping in a tick, with the SSH tunnel it went through.
+/// One connection's ping in a tick, with the tunnel it went through.
 #[derive(Debug, Clone)]
 pub struct TickPing {
     pub connection_id: String,
@@ -148,7 +148,7 @@ pub struct TickPing {
     pub verdict: PingVerdict,
 }
 
-/// A shared SSH tunnel to stop, and every connection that was using it.
+/// A shared tunnel to stop, and every connection that was using it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TunnelDiscard {
     pub lease: TunnelLease,
@@ -249,6 +249,7 @@ pub fn plan_tick(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::tunnels::TunnelRoute;
 
     const INTERVAL: Duration = Duration::from_secs(30);
 
@@ -324,7 +325,7 @@ mod tests {
 
     fn lease(generation: u64) -> Option<TunnelLease> {
         Some(TunnelLease {
-            key: "user@bastion:22:db->5432".into(),
+            route: TunnelRoute::Ssh("user@bastion:22:db->5432".into()),
             generation,
         })
     }

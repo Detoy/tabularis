@@ -4,16 +4,6 @@ use crate::models::{ConnectionParams, K8sConnection};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
-/// Serialize every test that touches the process-wide `TUNNELS` map.
-/// Both `stop_all_tunnels_tests` and `reuse_or_discard_dead_tests` call
-/// `stop_all_tunnels()`, so they must share one lock — separate
-/// `OnceLock`s race under `--test-threads > 1`.
-#[cfg(unix)]
-fn tunnels_map_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
-}
-
 mod build_tunnel_key_tests {
     use super::*;
 
@@ -496,6 +486,7 @@ mod is_alive_tests {
             .unwrap();
         K8sTunnel {
             local_port: 54321,
+            generation: crate::ssh_tunnel::next_generation(),
             child: Arc::new(Mutex::new(child)),
         }
     }
@@ -544,6 +535,7 @@ mod stop_all_tunnels_tests {
             .unwrap();
         K8sTunnel {
             local_port,
+            generation: crate::ssh_tunnel::next_generation(),
             child: Arc::new(Mutex::new(child)),
         }
     }
@@ -619,6 +611,7 @@ mod reuse_or_discard_dead_tests {
             .unwrap();
         K8sTunnel {
             local_port,
+            generation: crate::ssh_tunnel::next_generation(),
             child: Arc::new(Mutex::new(child)),
         }
     }
